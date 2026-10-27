@@ -1,0 +1,445 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "E2E receipt shapes",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/execution"
+    },
+    {
+      "$ref": "#/$defs/report_bundle"
+    }
+  ],
+  "$defs": {
+    "execution": {
+      "type": "object",
+      "description": "Receipt shape only. Runtime validates current approvals, input fingerprints, ownership and raw result binding. Additional descriptive fields are allowed; secrets are prohibited.",
+      "required": [
+        "type",
+        "execution_id",
+        "test_id",
+        "setup",
+        "attempt",
+        "result",
+        "started_at",
+        "ended_at"
+      ],
+      "properties": {
+        "type": {
+          "const": "execution"
+        },
+        "execution_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "test_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "setup": {
+          "type": "boolean"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "fail",
+            "skip",
+            "notrun"
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "method": {
+          "enum": [
+            "automation",
+            "manual",
+            "hardware"
+          ],
+          "default": "automation"
+        },
+        "legacy_group": {
+          "type": "boolean"
+        },
+        "blocked_by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Execution ID of a failed Setup in the current run. The schema enforces notrun + runner_result=skip + reason; runtime resolves the ID and verifies setup=true and result=fail."
+        },
+        "runner_result": {
+          "enum": [
+            "skip"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundle_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runner_test_pointer": {
+          "type": "string",
+          "pattern": "^/suites/\\d+(?:/suites/\\d+)*/specs/\\d+/tests/\\d+$"
+        },
+        "runner_result_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "steps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "result",
+              "evidence"
+            ],
+            "properties": {
+              "result": {
+                "enum": [
+                  "pass",
+                  "fail",
+                  "skip",
+                  "notrun"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              }
+            }
+          }
+        },
+        "failure_details": {
+          "type": "object",
+          "required": [
+            "expected",
+            "actual",
+            "phase",
+            "classification",
+            "location",
+            "cleanup"
+          ],
+          "properties": {
+            "expected": {
+              "type": "string",
+              "minLength": 1
+            },
+            "actual": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "type": "string",
+              "minLength": 1
+            },
+            "location": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cleanup": {
+              "type": "string",
+              "minLength": 1
+            },
+            "classification": {
+              "enum": [
+                "product_candidate",
+                "script",
+                "environment",
+                "needs_decision",
+                "deferred"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "readback": {}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "setup": {
+                "const": false
+              }
+            },
+            "required": [
+              "setup"
+            ]
+          },
+          "then": {
+            "required": [
+              "case_ids"
+            ],
+            "properties": {
+              "case_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "blocked_by"
+            ]
+          },
+          "then": {
+            "required": [
+              "runner_result",
+              "reason"
+            ],
+            "properties": {
+              "result": {
+                "const": "notrun"
+              },
+              "runner_result": {
+                "const": "skip"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "bundle_id"
+            ]
+          },
+          "then": {
+            "required": [
+              "runner_test_pointer",
+              "runner_result_index"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "legacy_group": {
+                "const": true
+              }
+            },
+            "required": [
+              "legacy_group"
+            ]
+          },
+          "else": {
+            "properties": {
+              "case_ids": {
+                "maxItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "report_bundle": {
+      "type": "object",
+      "description": "New-run invocation; blob_reports is mandatory. Older native_merge_required=false state may read legacy JSON-only evidence, never claim native merge.",
+      "required": [
+        "type",
+        "bundle"
+      ],
+      "properties": {
+        "type": {
+          "const": "report_bundle"
+        },
+        "bundle": {
+          "type": "object",
+          "required": [
+            "bundle_id",
+            "run_id",
+            "command",
+            "cwd",
+            "environment",
+            "scope",
+            "setup_projects",
+            "started_at",
+            "ended_at",
+            "exit_code",
+            "execution_result",
+            "html_origin",
+            "blob_reports"
+          ],
+          "properties": {
+            "bundle_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "run_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cwd": {
+              "type": "string",
+              "minLength": 1
+            },
+            "environment": {
+              "type": "string",
+              "minLength": 1
+            },
+            "execution_result": {
+              "type": "string",
+              "minLength": 1
+            },
+            "command": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "scope": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "setup_projects": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "started_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "ended_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "exit_code": {
+              "type": "integer"
+            },
+            "html_report": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "html_origin": {
+              "enum": [
+                "same_execution",
+                "rebuilt",
+                "none"
+              ]
+            },
+            "blob_reports": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "\\.zip$"
+              }
+            },
+            "rebuild_source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "rebuild_note": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "html_origin": {
+                    "const": "none"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "html_report"
+                ],
+                "properties": {
+                  "html_report": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "required": [
+                  "html_report"
+                ],
+                "properties": {
+                  "html_report": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "html_origin": {
+                    "const": "rebuilt"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "rebuild_source",
+                  "rebuild_note"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
