@@ -361,7 +361,7 @@ def global_residuals(project, state):
             others.append(load(path))
         except (ValueError, OSError):
             unreadable.append({'run_id': path.parent.name, 'status': 'unknown', 'suggestion': 'reconcile',
-                               'state_path': str(path.relative_to(project))})
+                               'state_path': path.relative_to(project).as_posix()})
     for other in others + [state]:
         for rid, resource in other['resources'].items():
             key = (resource.get('created_by_run', other['run_id']), resource.get('origin_resource_id', rid))
@@ -1032,7 +1032,7 @@ def initialize(project):
                     commands[name] = {'error': 'package file unreadable'}
     created, preserved = [], []
     for path, data in [(specpath, spec_text), (covpath, cov)]:
-        relative = str(path.relative_to(project))
+        relative = path.relative_to(project).as_posix()
         if path.exists():
             preserved.append(relative)
         else:
@@ -1261,8 +1261,9 @@ def doctor(project):
                       'errors': errors, 'action': 'repair listed coverage mappings' if errors else None})
     try:
         # --no-index tests the ignore policy even if cache files were accidentally tracked.
-        probe = subprocess.run(['git', 'check-ignore', '--no-index', '--stdin'],
-                               input='test/.cache/__e2e_ignore_probe__\n', text=True,
+        # NUL framing avoids text-mode CRLF becoming part of the probed Git path.
+        probe = subprocess.run(['git', 'check-ignore', '--no-index', '--stdin', '-z'],
+                               input='test/.cache/__e2e_ignore_probe__\0', text=True,
                                capture_output=True, cwd=project, timeout=5)
         ignored = probe.returncode == 0 and bool(probe.stdout.strip())
         items.append({'check': 'cache_gitignore', 'status': 'ok' if ignored else 'error',

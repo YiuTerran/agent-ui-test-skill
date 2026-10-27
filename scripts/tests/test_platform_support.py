@@ -123,7 +123,10 @@ with p.file_lock(f.fileno()): os._exit(0)
         calls = []
         def rename(handle, kind, pointer, size):
             info = p.RenameInfo.from_buffer(pointer)
-            raw = bytes(pointer)[p.RenameInfo.name.offset:size]
+            end = p.RenameInfo.name.offset + info.length
+            raw = bytes(pointer)[p.RenameInfo.name.offset:end]
+            self.assertGreaterEqual(size, end + 2)
+            self.assertEqual(b'\0\0', bytes(pointer)[end:end + 2])
             calls.append((kind, info.flags, info.root, info.length, raw.decode('utf-16-le')))
             return 1
         files.api = types.SimpleNamespace(SetFileInformationByHandle=rename)
@@ -144,6 +147,8 @@ with p.file_lock(f.fileno()): os._exit(0)
                 with files.handle('unused', directory=directory, shared_write=shared_write):
                     pass
                 self.assertEqual(3 if shared_write else 1, files.api.CreateFileW.call_args.args[2])
+                expected_access = files.ATTRIBUTES | (files.LIST_DIRECTORY if directory else 0)
+                self.assertEqual(expected_access, files.api.CreateFileW.call_args.args[1])
 
     def test_cli_modules_import_without_fcntl(self):
         with mock.patch.dict(sys.modules, fcntl=None):

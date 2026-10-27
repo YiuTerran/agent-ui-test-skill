@@ -214,6 +214,19 @@ class ReviewFixTest(unittest.TestCase):
         self.write('.gitignore', '/test/.cache/*\n!test/.cache/__e2e_ignore_probe__\n')
         self.cli('doctor', fail=True)
 
+    def test_doctor_ignore_probe_survives_windows_newline_translation(self):
+        subprocess.run(['git', 'init', '--quiet', str(self.project)], check=True, capture_output=True)
+        self.write('.gitignore', '/test/.cache/*\n!test/.cache/__e2e_ignore_probe__\n')
+        run = subprocess.run
+        def windows_text_input(*args, **kwargs):
+            if kwargs.get('text') and isinstance(kwargs.get('input'), str):
+                kwargs['input'] = kwargs['input'].replace('\n', '\r\n')
+            return run(*args, **kwargs)
+        with mock.patch.object(wf.subprocess, 'run', side_effect=windows_text_input):
+            result = self.cli('doctor', fail=True)
+        checks = {item['check']: item['status'] for item in result['checks']}
+        self.assertEqual('error', checks['cache_gitignore'])
+
     def test_preflight_commit_merges_batches_added_while_unlocked(self):
         self.start()
         concurrent = {'scopes': ['b'], 'retention': {'skipped': True, 'reason': 'synthetic'}}

@@ -257,7 +257,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(1, result['report_bundles']['E1']['business_attempts'])
 
     def add_blob(self, bundle):
-        relative = str(Path(bundle['execution_result']).parent / 'blob.zip')
+        relative = (Path(bundle['execution_result']).parent / 'blob.zip').as_posix()
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, 'w') as archive:
             archive.writestr('report.jsonl', json.dumps({'method': 'onBlobReportMetadata',

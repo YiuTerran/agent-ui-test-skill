@@ -90,6 +90,7 @@ class WindowsFiles:
     READ = 0x80000000
     DELETE = 0x00010000
     ATTRIBUTES = 0x80
+    LIST_DIRECTORY = 0x1
     REPARSE = 0x400
     DIRECTORY = 0x10
 
@@ -140,6 +141,9 @@ class WindowsFiles:
         # Deny directory reparse mutations and file writes through validation/mutation.
         # Only coordination lock files need concurrent writable handles.
         flags = 0x00200000 | (0x02000000 if directory else 0)
+        # Attribute-only opens do not enforce Windows read/delete sharing checks.
+        if directory:
+            access |= self.LIST_DIRECTORY
         handle = self.api.CreateFileW(self.native(path), access, 3 if shared_write else 1, None,
                                       4 if create else 3, flags, None)
         if handle == ctypes.c_void_p(-1).value:
@@ -208,7 +212,8 @@ class WindowsFiles:
 
     def rename(self, handle, destination):
         encoded = self.native(destination).encode('utf-16-le')
-        size = RenameInfo.name.offset + len(encoded)
+        # The Win32 DOS-to-NT conversion reads a NUL-terminated name despite length.
+        size = RenameInfo.name.offset + len(encoded) + 2
         buffer = ctypes.create_string_buffer(max(size, ctypes.sizeof(RenameInfo)))
         info = RenameInfo.from_buffer(buffer)
         info.flags, info.root, info.length = 0, None, len(encoded)
