@@ -85,6 +85,21 @@ class RenameInfo(ctypes.Structure):
                 ('length', ctypes.c_uint32), ('name', ctypes.c_uint16 * 1)]
 
 
+class UnicodeString(ctypes.Structure):
+    _fields_ = [('length', ctypes.c_uint16), ('maximum', ctypes.c_uint16),
+                ('buffer', ctypes.c_void_p)]
+
+
+class ObjectAttributes(ctypes.Structure):
+    _fields_ = [('length', ctypes.c_uint32), ('root', ctypes.c_void_p),
+                ('name', ctypes.POINTER(UnicodeString)), ('attributes', ctypes.c_uint32),
+                ('security', ctypes.c_void_p), ('quality', ctypes.c_void_p)]
+
+
+class IoStatus(ctypes.Structure):
+    _fields_ = [('status', ctypes.c_void_p), ('information', ctypes.c_size_t)]
+
+
 class WindowsFiles:
     """Pin parent directories against replacement and mutate only verified handles."""
     READ = 0x80000000
@@ -109,6 +124,117 @@ class WindowsFiles:
         for name, (args, result) in signatures.items():
             function = getattr(self.api, name)
             function.argtypes, function.restype = args, result
+        self.nt = ctypes.WinDLL('ntdll')
+        signatures = {
+            'NtCreateFile': ([ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint32,
+                              ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IoStatus),
+                              ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                              ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                              ctypes.c_uint32], ctypes.c_int32),
+            'NtSetInformationFile': ([ctypes.c_void_p, ctypes.POINTER(IoStatus),
+                                      ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int], ctypes.c_int32),
+            'NtQueryDirectoryFile': ([ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                      ctypes.c_void_p, ctypes.POINTER(IoStatus), ctypes.c_void_p,
+                                      ctypes.c_uint32, ctypes.c_int, ctypes.c_ubyte,
+                                      ctypes.c_void_p, ctypes.c_ubyte], ctypes.c_int32),
+            'RtlNtStatusToDosError': ([ctypes.c_int32], ctypes.c_uint32)}
+        for name, (args, result) in signatures.items():
+            function = getattr(self.nt, name)
+            function.argtypes, function.restype = args, result
+
+    def checked(self, status):
+        if status < 0:
+            raise ctypes.WinError(self.nt.RtlNtStatusToDosError(status))
+
+    @contextmanager
+    def child(self, parent, name, access=ATTRIBUTES, directory=None, create=False,
+              exclusive=False, shared_write=False):
+        """Open exactly one component relative to a verified directory, never its path."""
+        if len(relative_parts(name)) != 1:
+            raise ValueError('expected a single child name')
+        self.info(parent)
+        encoded = name.encode('utf-16-le')
+        buffer = ctypes.create_string_buffer(encoded + b'\0\0')
+        text = UnicodeString(len(encoded), len(encoded) + 2, ctypes.addressof(buffer))
+        attributes = ObjectAttributes(ctypes.sizeof(ObjectAttributes), parent,
+                                      ctypes.pointer(text), 0x40, None, None)
+        # Directories must permit the kernel's rename-target open for FILE_WRITE_DATA.
+        # Confinement comes from RootDirectory + a single no-follow component, not paths.
+        options = 0x00200000 | 0x20  # OPEN_REPARSE_POINT, SYNCHRONOUS_IO_NONALERT
+        if directory is not None:
+            options |= 1 if directory else 0x40
+        if directory:
+            access |= self.LIST_DIRECTORY
+        handle, result = ctypes.c_void_p(), IoStatus()
+        self.checked(self.nt.NtCreateFile(
+            ctypes.byref(handle), access | 0x100000, ctypes.byref(attributes),
+            ctypes.byref(result), None, 0x80, 3 if directory or shared_write else 1,
+            2 if exclusive else (3 if create else 1), options, None, 0))
+        try:
+            info = self.info(handle)
+            if directory is not None and info['directory'] != directory:
+                raise ValueError('unexpected file type: ' + name)
+            yield handle
+        finally:
+            self.api.CloseHandle(handle)
+
+    @contextmanager
+    def rooted_directory(self, path):
+        """Walk from the fixed drive root using handles, including all ancestors."""
+        from contextlib import ExitStack
+        path = Path(path).absolute()
+        anchor = Path(path.anchor)
+        if self.api.GetDriveTypeW(str(anchor)) != 3:
+            raise ValueError('retention requires a fixed local Windows volume')
+        with ExitStack() as stack:
+            handle = stack.enter_context(self.handle(anchor, directory=True, shared_write=True))
+            for name in path.parts[1:]:
+                handle = stack.enter_context(self.child(handle, name, directory=True))
+            yield handle
+
+    def names(self, handle):
+        """Enumerate the pinned directory object, not a possibly changed pathname."""
+        self.info(handle)
+        buffer, result = ctypes.create_string_buffer(65536), IoStatus()
+        restart = True
+        while True:
+            status = self.nt.NtQueryDirectoryFile(handle, None, None, None, ctypes.byref(result),
+                                                  buffer, len(buffer), 12, False, None, restart)
+            if status == -2147483642:  # STATUS_NO_MORE_FILES
+                return
+            self.checked(status)
+            if not result.information:
+                raise OSError('empty Windows directory enumeration')
+            offset = 0
+            while True:
+                next_offset = ctypes.c_uint32.from_buffer(buffer, offset).value
+                length = ctypes.c_uint32.from_buffer(buffer, offset + 8).value
+                if offset + 12 + length > result.information or length % 2:
+                    raise OSError('invalid Windows directory entry')
+                name = buffer.raw[offset + 12:offset + 12 + length].decode('utf-16-le')
+                if name not in {'.', '..'}:
+                    relative_parts(name)
+                    yield name
+                if not next_offset:
+                    break
+                if next_offset < 12 + length or offset + next_offset >= result.information:
+                    raise OSError('invalid Windows directory offset')
+                offset += next_offset
+            restart = False
+
+    def rename_child(self, handle, parent, name, replace=False):
+        if len(relative_parts(name)) != 1:
+            raise ValueError('expected a single child name')
+        self.info(parent)
+        encoded = name.encode('utf-16-le')
+        size = max(RenameInfo.name.offset + len(encoded) + 2, ctypes.sizeof(RenameInfo))
+        buffer = ctypes.create_string_buffer(size)
+        info = RenameInfo.from_buffer(buffer)
+        info.flags, info.root, info.length = int(replace), getattr(parent, 'value', parent), len(encoded)
+        ctypes.memmove(ctypes.addressof(buffer) + RenameInfo.name.offset, encoded, len(encoded))
+        result = IoStatus()
+        # NtSetInformationFile accepts RootDirectory; the Win32 wrapper requires NULL.
+        self.checked(self.nt.NtSetInformationFile(handle, ctypes.byref(result), buffer, size, 10))
 
     @staticmethod
     def native(path):
@@ -138,8 +264,7 @@ class WindowsFiles:
 
     @contextmanager
     def handle(self, path, access=ATTRIBUTES, directory=False, create=False, shared_write=False):
-        # Deny directory reparse mutations and file writes through validation/mutation.
-        # Only coordination lock files need concurrent writable handles.
+        # Path-based pins deny write by default; handle-relative roots opt into it.
         flags = 0x00200000 | (0x02000000 if directory else 0)
         # Attribute-only opens do not enforce Windows read/delete sharing checks.
         if directory:

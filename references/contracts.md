@@ -268,7 +268,7 @@ plan.cleanup_scan_seconds为扫描耗时；apply的timing.cleanup_scan_seconds�
 
 - **路径/编码**：UTF-8，证据用项目相对`/`路径；CLI可本机绝对路径，含空格加引号。Windows拒盘符相对、ADS、设备名、尾随点/空格；读写集按大小写/分隔符别名互斥。PowerShell用`$env:NAME = "value"`。
 - **锁/进程**：macOS/Linux用fcntl.flock，Windows用msvcrt首字节锁、有界等待；只短时持锁，JSON另替换。Windows OpenProcess(SYNCHRONIZE)+零等待只读探测，无权/API不可用为unknown、不回收；不用os.kill。进程退出释放内核锁，不自动释放任务配额。
-- **清理**：POSIX保留dir_fd/O_NOFOLLOW；Windows固定本地磁盘Win32句柄，固定父目录、拒reparse/junction和多硬链接，句柄验证后重命名/删除；祖先/普通文件禁共享写删，锁文件可共享写。能力不足或占用失败保留恢复记录；UNC/网络盘不作目标，推荐NTFS。
+- **清理**：POSIX保留dir_fd/O_NOFOLLOW；Windows固定本地磁盘，从盘根逐级以目录句柄和单段名称打开，不重新解析绝对路径；拒reparse/junction和多硬链接，以已验证句柄枚举/读写/重命名/删除。目录禁止共享删除，允许内核重命名所需的共享写；即使校验后目录被设为reparse，句柄相对子项操作也不能重定向到外部目录。普通文件禁共享写删，锁文件可共享写。能力不足或占用失败保留恢复记录；UNC/网络盘不作目标，推荐NTFS。
 - **持久化**：Windows不覆盖rename，不依赖硬链接/目录fsync；支持进程中断恢复，不承诺断电目录元数据持久性。同缓存不跨主机或WSL/原生Windows同时共享。
 
 发布/维护时可在目标宿主运行`python3 -m unittest discover -s "<skill>/scripts/tests" -v`（Windows用`py -3`）；非Windows的skip不计Windows通过。mock仅证明调用约束，原生Windows测试才验证句柄/junction/进程/资源；缺symlink权限仅跳该项，junction继续。发布在Windows/Linux/macOS各自测；ego-lite/Playwright集成能力在实际目标环境另行验证，本地适配不证明浏览器可用。

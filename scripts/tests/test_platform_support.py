@@ -152,6 +152,45 @@ with p.file_lock(f.fileno()): os._exit(0)
                 expected_access = files.ATTRIBUTES | (files.LIST_DIRECTORY if directory else 0)
                 self.assertEqual(expected_access, files.api.CreateFileW.call_args.args[1])
 
+    def test_native_child_open_uses_one_no_follow_component_and_root_handle(self):
+        files = object.__new__(p.WindowsFiles)
+        captured = []
+        def create(output, access, attributes, result, size, flags, sharing, disposition,
+                   options, ea, ea_size):
+            attributes = ctypes.cast(attributes, ctypes.POINTER(p.ObjectAttributes)).contents
+            name = attributes.name.contents
+            captured.append((attributes.root, ctypes.string_at(name.buffer, name.length),
+                             access, sharing, disposition, options))
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 456
+            return 0
+        files.nt = types.SimpleNamespace(NtCreateFile=create)
+        files.api = types.SimpleNamespace(CloseHandle=mock.Mock())
+        with mock.patch.object(files, 'info', return_value={'directory': True}):
+            with files.child(123, '目录', directory=True, create=True):
+                pass
+            self.assertEqual((123, '目录'.encode('utf-16-le')), captured[0][:2])
+            self.assertEqual((3, 3), captured[0][3:5])
+            self.assertTrue(captured[0][5] & 0x00200000)
+            self.assertTrue(captured[0][2] & files.LIST_DIRECTORY)
+            for name in ['a/b', '..', 'a\\b', 'C:escape', '/absolute']:
+                with self.assertRaises(ValueError):
+                    with files.child(123, name):
+                        self.fail('unsafe name accepted')
+        files.api.CloseHandle.assert_called_once()
+
+    def test_native_rename_uses_parent_handle_and_never_an_absolute_path(self):
+        files = object.__new__(p.WindowsFiles)
+        def rename(handle, result, buffer, size, kind):
+            info = p.RenameInfo.from_buffer(buffer)
+            name = bytes(buffer)[p.RenameInfo.name.offset:][:info.length].decode('utf-16-le')
+            self.assertEqual((123, 10, 456, '结果.json', 1), (handle, kind, info.root, name, info.flags))
+            return 0
+        files.nt = types.SimpleNamespace(NtSetInformationFile=rename)
+        with mock.patch.object(files, 'info'):
+            files.rename_child(123, ctypes.c_void_p(456), '结果.json', replace=True)
+            with self.assertRaises(ValueError):
+                files.rename_child(123, ctypes.c_void_p(456), 'nested/escape')
+
     def test_cli_modules_import_without_fcntl(self):
         with mock.patch.dict(sys.modules, fcntl=None):
             for name in ['workflow', 'scheduling', 'retention', 'source_cache', 'import_results']:
@@ -244,8 +283,89 @@ class NativeWindowsTest(unittest.TestCase):
             self.assertEqual({'version': 1}, json.loads(tree.read(relative)[0]))
             tree.write(relative, {'version': 3})
             self.assertEqual({'version': 3}, json.loads(tree.read(relative)[0]))
+            staged = 'test/.cache/retention/quarantine/renamed.json'
+            tree.move(relative, staged, tree.read(relative)[1])
+            self.assertFalse(tree.exists(relative))
+            self.assertEqual({'version': 3}, json.loads(tree.read(staged)[0]))
+            self.assertIn(staged, tree.walk('test/.cache/retention'))
+            tree.restore(staged, relative)
+            self.assertFalse(tree.exists(staged))
+            self.assertEqual({'version': 3}, json.loads(tree.read(relative)[0]))
         finally:
             tree.close()
+
+    def test_handle_relative_root_cannot_be_renamed(self):
+        directory = self.root / 'pinned'
+        directory.mkdir()
+        with self.files.rooted_directory(directory):
+            with self.assertRaises(OSError):
+                directory.rename(self.root / 'replacement')
+
+    def mutate_junction(self, directory, target, delete=False):
+        import struct
+        if delete:
+            payload = struct.pack('<IHH', 0xA0000003, 0, 0)
+        else:
+            substitute = ('\\??\\' + str(target)).encode('utf-16-le')
+            display = str(target).encode('utf-16-le')
+            names = substitute + b'\0\0' + display + b'\0\0'
+            payload = struct.pack('<IHHHHHH', 0xA0000003, 8 + len(names), 0,
+                                  0, len(substitute), len(substitute) + 2, len(display)) + names
+        operation = self.files.api.DeviceIoControl
+        operation.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+                              ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32),
+                              ctypes.c_void_p]
+        operation.restype = ctypes.c_int
+        raw = self.files.api.CreateFileW(self.files.native(directory), 0x40000000, 3,
+                                         None, 3, 0x02200000, None)
+        if raw == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            count = ctypes.c_uint32()
+            code = 0x900AC if delete else 0x900A4
+            if not operation(raw, code, payload, len(payload), None, 0, ctypes.byref(count), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            self.files.api.CloseHandle(raw)
+
+    def test_reparse_mutation_after_validation_cannot_redirect_child_creation_or_rename(self):
+        for action in ['create', 'rename']:
+            with self.subTest(action=action):
+                directory, outside = self.root / action, self.root / (action + '-outside')
+                directory.mkdir()
+                outside.mkdir()
+                source = self.root / (action + '-source')
+                source.write_bytes(b'keep')
+                with self.files.rooted_directory(directory) as parent:
+                    original_info = self.files.info
+                    changed = False
+                    def mutate_after_check(handle):
+                        nonlocal changed
+                        result = original_info(handle)
+                        if handle is parent and not changed:
+                            self.mutate_junction(directory, outside)
+                            changed = True
+                        return result
+                    try:
+                        with self.files.handle(source, access=self.files.READ | self.files.DELETE) as handle:
+                            with mock.patch.object(self.files, 'info', side_effect=mutate_after_check):
+                                try:
+                                    if action == 'create':
+                                        with self.files.child(parent, 'must-stay-local', directory=False,
+                                                              access=0xC0000000, exclusive=True):
+                                            pass
+                                    else:
+                                        self.files.rename_child(handle, parent, 'must-stay-local')
+                                except (OSError, ValueError):
+                                    pass  # Refusal is safe; escaping the pinned object is not.
+                        self.assertTrue(changed)
+                        self.assertEqual([], list(outside.iterdir()))
+                        with self.assertRaises(ValueError):
+                            with self.files.child(parent, 'another', directory=False, exclusive=True):
+                                self.fail('known reparse parent accepted')
+                    finally:
+                        if changed:
+                            self.mutate_junction(directory, outside, delete=True)
 
     def test_native_validated_file_cannot_be_written_until_handle_closes(self):
         source = self.root / 'protected'

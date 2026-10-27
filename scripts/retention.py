@@ -220,22 +220,25 @@ class PosixTree:
 
 
 class WindowsTree:
-    """Local-drive backend: pin ancestors, reject reparse points, mutate by handle."""
+    """Local-drive backend: resolve every child relative to verified directory handles."""
     def __init__(self, project):
         require('..' not in Path(project).parts, 'project path traversal')
         self.path = os.path.abspath(os.fspath(project))
         self.files = platform_support.WindowsFiles()
-        self.root = self.files.directories(self.path)
-        self.root.__enter__()
+        self.root = self.files.rooted_directory(self.path)
+        self.root_handle = self.root.__enter__()
 
     def close(self):
         self.root.__exit__(None, None, None)
 
     @contextmanager
     def parent(self, value, create=False):
+        from contextlib import ExitStack
         names = parts(value)
-        parent = Path(self.path).joinpath(*names[:-1])
-        with self.files.directories(parent, create=create):
+        with ExitStack() as stack:
+            parent = self.root_handle
+            for name in names[:-1]:
+                parent = stack.enter_context(self.files.child(parent, name, directory=True, create=create))
             yield parent, names[-1]
 
     def stamp(self, handle):
@@ -249,80 +252,81 @@ class WindowsTree:
 
     def read(self, value):
         with self.parent(value) as (parent, name):
-            with self.files.handle(parent / name, access=self.files.READ) as handle:
+            with self.files.child(parent, name, access=self.files.READ, directory=False) as handle:
                 return self.stamp(handle)
 
     def exists(self, value):
         try:
             with self.parent(value) as (parent, name):
-                path = parent / name
-                info = path.lstat()
-                require(not (getattr(info, 'st_file_attributes', 0) & self.files.REPARSE),
-                        'reparse point/junction is not allowed')
-                with self.files.handle(path, directory=stat.S_ISDIR(info.st_mode)):
+                with self.files.child(parent, name):
                     return True
         except FileNotFoundError:
             return False
 
     def walk(self, value):
         result = {}
-        with self.parent(value) as (parent, name):
-            path = parent / name
-            with self.files.handle(path, directory=True) as handle:
-                result[value + '/'] = self.files.info(handle)['identity'][:2]
-                for child in sorted(path.iterdir()):
-                    child_value = value + '/' + child.name
-                    parts(child_value)
-                    info = child.lstat()
-                    require(not (getattr(info, 'st_file_attributes', 0) & self.files.REPARSE),
-                            'reparse point/junction is not allowed')
-                    if stat.S_ISDIR(info.st_mode):
-                        result.update(self.walk(child_value))
+        def visit(handle, path):
+            result[path + '/'] = self.files.info(handle)['identity'][:2]
+            for name in sorted(self.files.names(handle)):
+                child_value = path + '/' + name
+                parts(child_value)
+                with self.files.child(handle, name, access=self.files.READ) as child:
+                    if self.files.info(child)['directory']:
+                        visit(child, child_value)
                     else:
-                        with self.files.handle(child, access=self.files.ATTRIBUTES):
-                            result[child_value] = None
+                        result[child_value] = None
+        with self.parent(value) as (parent, name):
+            with self.files.child(parent, name, access=self.files.READ, directory=True) as handle:
+                visit(handle, value)
         return result
 
     def write(self, value, data, exclusive=False):
         payload = canonical(data) + b'\n'
         with self.parent(value, create=True) as (parent, name):
-            target = parent / name
-            temporary = parent / ('.retention-' + secrets.token_hex(12))
-            try:
-                with temporary.open('xb') as stream:
-                    stream.write(payload)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                if not exclusive and self.exists(value):
-                    self.read(value)
-                # MoveFileEx opens pinned parents incompatibly; mutate by file handle.
-                with self.files.handle(temporary, access=self.files.READ | self.files.DELETE) as handle:
-                    self.files.rename(handle, target, replace=not exclusive)
-            finally:
-                temporary.unlink(missing_ok=True)
+            temporary = '.retention-' + secrets.token_hex(12)
+            with self.files.child(parent, temporary, access=0xC0010000,
+                                  directory=False, exclusive=True) as handle:
+                renamed = False
+                try:
+                    with self.files.descriptor(handle, os.O_RDWR) as fd:
+                        remaining = memoryview(payload)
+                        while remaining:
+                            written = os.write(fd, remaining)
+                            require(written > 0, 'short metadata write')
+                            remaining = remaining[written:]
+                        os.fsync(fd)
+                    if not exclusive and self.exists(value):
+                        self.read(value)
+                    self.files.rename_child(handle, parent, name, replace=not exclusive)
+                    renamed = True
+                finally:
+                    if not renamed:
+                        self.files.delete(handle)
 
     @contextmanager
     def lock(self, value):
         with self.parent(value, create=True) as (parent, name):
-            with self.files.handle(parent / name, access=0xC0000000,
-                                   create=True, shared_write=True) as handle:
+            with self.files.child(parent, name, access=0xC0000000, directory=False,
+                                  create=True, shared_write=True) as handle:
                 with self.files.descriptor(handle, os.O_RDWR) as fd:
                     with platform_support.file_lock(fd):
                         yield
 
     def move(self, source, target, expected=None):
         with self.parent(source) as (src, name), self.parent(target, create=True) as (dst, stage):
-            with self.files.handle(src / name, access=self.files.READ | self.files.DELETE) as handle:
+            with self.files.child(src, name, access=self.files.READ | self.files.DELETE,
+                                  directory=False) as handle:
                 if expected:
                     require(self.stamp(handle)[1] == expected, 'artifact changed before staging: ' + source)
-                self.files.rename(handle, dst / stage)
+                self.files.rename_child(handle, dst, stage)
 
     def restore(self, source, target):
         self.move(source, target)
 
     def delete(self, value, expected_hash):
         with self.parent(value) as (parent, name):
-            with self.files.handle(parent / name, access=self.files.READ | self.files.DELETE) as handle:
+            with self.files.child(parent, name, access=self.files.READ | self.files.DELETE,
+                                  directory=False) as handle:
                 require(self.stamp(handle)[1]['sha256'] == expected_hash, 'quarantine artifact changed')
                 self.files.delete(handle)
 
