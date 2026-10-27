@@ -24,7 +24,7 @@ test/.cache/runs/<run-id>/
 
 执行writer在运行前配置JSON、HTML、blob与runner输出目录。Windows用`py -3`，相对证据路径用`/`，PowerShell用`$env:变量名 = "值"`。沿用项目注入机制；Playwright可使用`PLAYWRIGHT_JSON_OUTPUT_FILE`、`PLAYWRIGHT_HTML_OUTPUT_DIR`、`PLAYWRIGHT_BLOB_OUTPUT_DIR`和`PLAYWRIGHT_HTML_OPEN=never`配合`--reporter=list,json,html,blob`、`--output`，或在项目配置显式设置各reporter路径，参数以安装版本为准。路径落在本次attempt目录；保留真实退出码，测试失败也收集和清理。
 
-新run固定`native_merge_required=true`，每个bundle必须绑定当前schema的Attempt计划和摘要，每次CLI保留原始JSON与单个原生blob ZIP，正常同时生成同次HTML；最终核验全轮原生合并。完整验收要求regression_completeness=complete；缺少bundle、只有affected或旧式直接execution均不能替代收尾full。仅旧run兼容JSON-only（html_report:null、html_origin:none）和未声明用途的not_declared，明确受限；HTML格式不受支持时保留原始证据并报告受阻。
+新run固定`native_merge_required=true`，每个结果bundle必须绑定当前schema的Attempt计划和摘要，保留原始JSON与单个原生blob ZIP，正常同时生成同次HTML；最终核验全轮原生合并。完整验收要求regression_completeness=complete；缺少bundle、只有affected或旧式直接execution均不能替代收尾full。仅旧run兼容JSON-only（html_report:null、html_origin:none）和未声明用途的not_declared，明确受限；HTML格式不受支持时保留原始证据并报告受阻。
 
 开发验证跑受影响项，收尾默认全量现有自动化。首次回归前prepare-regression、配额与冲突规则见[最小命令顺序](workflow.md#最小命令顺序)；拆命令隔离输出/认证，分别领取配额。将真实发现与完整状态的regression_inventory核对全目标，未审批/缺依赖/权限不足逐项受阻，不静默过滤；默认简报无需展开全清单。
 
@@ -32,13 +32,32 @@ test/.cache/runs/<run-id>/
 
 离线重建HTML时使用`html_origin:rebuilt`，写明原始JSON及重建方式、时间和版本限制，说明没有重新执行测试。重建不能补造原JSON没有的步骤、截图或断言，不能替代同一次实际执行的原始HTML。
 
+## 执行预算与失败分流
+
+新增共享fixture、微应用导航或复杂表单控件时，先选择覆盖不同交互分支的少量代表用例，以实际CLI验证创建回执、定位、持久化和逆依赖清理。离线夹具测试覆盖在途请求动态加入、超时及空集合等实际涉及的分支；静态检查通过与ego探索成功各自不能代替Playwright路径验证。代表用例因已确认产品差异失败时，保留需求断言，核对其余步骤是否实际到达；未到达的交互分支保持待验证。
+
+执行前结合稳定的同规模历史批次、实际test数、workers及test/fixture/teardown预算估计本批墙钟。可用项目支持的global timeout约束整批，执行选择和timeout参数在attempt-init之前确定并进入计划。业务超时预算与宿主命令的输出等待窗口分别设置，等待窗口到期只表示工具返回会话句柄，不表示runner退出。
+
+无新完成用例、输出或资源观察的间隔超过当前步骤及teardown预算时，只做一次有针对性的检查：进程仍在运行与否、最近runner输出、断网/浏览器启动错误及资源账本。持续有进展则继续；真实长业务步骤按其预算等待。确认失去进展后优先使用runner支持的受控中断，保留输出、准确起止/退出码及可取得的产物，等待teardown并核清创建结果；进程与清理状态未核清时继续保留配额。中断产物不齐时通过[attempt-interrupted](local-tools.md#attempt准备与事件生成)登记仅回执调用，报告与计时保留它，不补造测试结果或启动相同写操作。
+
+失败先按证据分流，修复只改变已证明有缺陷的测试代码：
+
+- 产品预期差异：保留需求断言、实际请求及回读证据；同一差异不触发重复全量
+- 脚本/fixture问题：一次处理同根因定位与时序问题，先定向验证受影响case和相关既有case，再决定全量；仍沿用每case最多两次针对性修复预算
+- 环境/认证问题：恢复已确认的网络、浏览器启动权限或身份条件后再验证；Setup失败的依赖目标按实际project配置/日志列为未执行，不算业务失败或脚本修复次数
+- 证据绑定问题：修复计划、路径或映射，复用原始产物；仅当确需新的真实执行证据时才新增CLI
+
+收尾目标是当前代码的一次完整full，不是固定运行多轮。全量后代码变化会使相关结果失效，定向验证通过后补齐当前版本的full；既有完整性门禁继续生效。预计会继续修复共享夹具时，先完成定向验证，不提前以全量代替调试。CLI运行期间只并行只读诊断、资源审阅或独立写集工作，实际runner读取的测试、fixture和配置保持稳定。
+
+报告阶段分别检查原生merge与工作流report进程。有CPU活动或产物写出时保留现有调用，必要时一次定点诊断；不并发重启report或用重跑测试处理报告计算缓慢。工具修改属于独立维护范围，实际测试轮内保留错误及证据后按授权处置。
+
 ## 绑定与校验
 
 执行者准备一个`report_bundle`事件，由主owner收集：
 
 优先用[Attempt模板](local-tools.md#attempt准备与事件生成)准备目录和reporter参数，实际CLI回执落command.json，attempt-bundle统一检查并生成事件；已有完整且真实的bundle事件仍可直接collect-results，正常不额外调用attempt-check或validate-input。
 
-新Attempt生成的bundle保留plan路径和摘要，直接采集也执行相同契约。全量目标完整性单列于summary.regression_completeness及交付报告，比较完整发现清单与实际目标，保留缺失、多余、Setup和分片差集；collect-results的complete仅指原始结果绑定完整，不能替代全量目标完整性。
+新Attempt生成的bundle保留plan路径和摘要，直接采集也执行相同契约。全量完整性同时比较发现清单/实际目标及计划中的spec/fixture代码指纹，保留缺失、多余、Setup、分片和code_changed_after_full差异；分片不能跨代码版本拼成full。原始结果不因当前代码变化而改写，collect-results的complete仅指结果绑定完整，不能替代当前代码的全量完整性。指纹范围与扩展目录见[Attempt准备](local-tools.md#attempt准备与事件生成)。
 
 | bundle字段 | 必填性 | 值/门禁 |
 | --- | --- | --- |
@@ -120,7 +139,7 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 
 1. 将本轮所有已登记`blob_reports`复制到独立合并输入目录，用bundleID前缀避免同名覆盖，核对数量和SHA-256；不混入历史run。本轮失败CLI也纳入，新run缺blob必须阻塞，不以“限制”替代门禁
 2. 运行项目包管理器对应的`playwright merge-reports --reporter=html <input-dir>`，将`PLAYWRIGHT_HTML_OUTPUT_DIR`设为`test/.cache/runs/<run-id>/merged/playwright`，`PLAYWRIGHT_HTML_OPEN=never`。PowerShell使用环境变量赋值或显式merge配置。保持安装版本和testDir一致，不在线升级依赖
-3. 用record登记下列merged_report事件。校验器要求bundle_ids恰好覆盖本轮全部CLI，并比较原始JSON与合并HTML中的每次尝试、结果统计、错误详情及附件内容摘要。合并不能丢失失败、重跑、Setup或skip；若Playwright版本/合并行为无法保持这些证据则列限制，不声称已核验
+3. 用record登记下列merged_report事件。校验器要求bundle_ids恰好覆盖本轮全部结果bundle；仅回执中断调用由交付入口单列，并比较原始JSON与合并HTML中的每次尝试、结果统计、错误详情及附件内容摘要。合并不能丢失失败、重跑、Setup或skip；若Playwright版本/合并行为无法保持这些证据则列限制，不声称已核验
 4. 核对覆盖、审批、逐次结果和资源清理，记录实际验收终态，再调用一次最终report，生成含终态的`report.html`未通过优先索引、summary及Markdown；检查成功后释放租约。原生HTML内部可能按文件/用例组织；交付入口固定逐尝试排序，作为定位失败的第一入口。索引是衍生视图，只有原生合并成功且已核验才显示“合并报告已核验”
 
 ```json
@@ -144,7 +163,11 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 
 验收同时引用timing阶段区间并集、调度账本登记峰值、source_cache_hits及retention文件/字节，并呈现计划/结果的diagnostics：候选、选中、受保护数量，保护来源/字段/原因/样例路径及按原因排除数量，完整字段见[回收契约](contracts.md#运行历史回收)。零回收须显示zero_reason，无历史、全部活跃或审批/资源恢复保护均可合法为0；只有可清候选去向无法解释才是cleanup_candidate_mismatch（exit2）。清理计时引用plan.cleanup_scan_seconds及apply结果timing.cleanup_scan_seconds、timing.cleanup_apply_seconds；应用耗时含复核、隔离和删除，不称纯unlink。replayed=true时展示首次已存计时，不重复累计。说明实际测量和规划估计，不承诺固定耗时或倍数。
 
-耗时至少区分用户请求到最终交付的可观测会话墙钟、run创建到报告生成的timing.wall_seconds、实际runner调用时长；会话时间由宿主证据补充，脚本内run墙钟不能代替用户体感。并行命令按区间并集统计，串行时才相加。现有任务/日志能够支持时补充准备、来源读取、探索、编码、工具修复、协调/收尾及人等，并标明重叠；阶段首尾跨度明确标为区间，不能当作持续工作时间。unknown单列，不将夜间空档推断为模型、网络或宿主故障。计数、时间和绑定差异尽量在最终报告生成前一次核对，避免交付前重复手写统计脚本。
+耗时区分用户请求到最终交付的可观测会话墙钟、run创建到summary取样的timing.wall_seconds、实际runner调用时长及报告生成耗时。summary.generated_at是汇总取样时点；report_generation记录报告正文和续租状态写出后的完成采样，不含最后summary落盘、stdout、释放租约和最终答复。会话边界优先核查当前宿主日志，脚本内run墙钟不能代替用户体感。
+
+现有任务/日志能够支持时补充准备、来源读取、探索、编码、工具修复、协调/收尾及人工等待，使用已有粗粒度phase_time或宿主证据，未知保持null。连续时间线与重叠工作区间分开展示；并行按区间并集，串行才相加。CLI墙钟与result.duration/实际区间差额单列未归因，其中可能包含启动、teardown、reporter和外部等待；逐test时长也含等待与超时，不称持续有效操作时间。human_wait_seconds只覆盖已登记的人等事件；范围选择问答可另据宿主时间线恢复。计数、时间和绑定差异尽量在最终报告生成前一次核对，复盘用只读timing，不重开终态run或重跑report。
+
+报告一致性核验在同一项目锁内批量读取一次已校验的回收日志，当前调用内供bundle、合并产物和报告链接判断复用。各次调用重新验证日志、计划与路径状态，继续检查保留文件SHA-256及全部逐次映射；损坏日志、无日志缺失或重新出现的路径均不能凭历史快照认定已回收。
 
 ## 覆盖补全状态
 

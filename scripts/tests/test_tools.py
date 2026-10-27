@@ -324,6 +324,30 @@ class ToolsTest(TestCase):
         self.write('timing.json', {'session': {'started_at': wf.now(), 'ended_at': wf.now()}})
         self.cli('timing', '--run', self.run, '--input', str(self.project / 'timing.json'), fail=True)
 
+    def test_terminal_timing_includes_report_generation_and_keeps_legacy_fallback(self):
+        self.start()
+        state = self.state()
+        start = wf.dt(state['created_at'])
+        state['acceptance'] = 'partially_blocked'
+        self.write(f'test/.cache/runs/{self.run}/state.json', state)
+        generated = (start + timedelta(seconds=10)).isoformat()
+        generation = {'started_at': generated,
+                      'completed_at': (start + timedelta(seconds=16)).isoformat(),
+                      'wall_seconds': 6}
+        summary_path = f'test/.cache/runs/{self.run}/summary.json'
+        self.write(summary_path, {'generated_at': generated, 'report_generation': generation})
+        before = self.snapshot()
+        result = self.cli('timing', '--run', self.run)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(16, result['workflow']['wall_seconds'])
+        self.assertEqual(6, result['workflow']['known_interval_union_seconds'])
+        self.assertEqual(10, result['workflow']['unknown_wall_seconds'])
+        self.assertEqual(generation, result['report_generation'])
+        self.write(summary_path, {'generated_at': generated})
+        result = self.cli('timing', '--run', self.run)
+        self.assertEqual(10, result['workflow']['wall_seconds'])
+        self.assertIsNone(result['report_generation'])
+
     def test_timing_streams_bounded_host_log_without_emitting_arguments(self):
         self.start()
         start = datetime.now(timezone.utc)-timedelta(seconds=5)

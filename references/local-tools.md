@@ -99,11 +99,12 @@ python3 "$WF" attempt-init --project "$PROJECT" --run "$RUN" --owner "$OWNER" --
 regression_mode与收尾完整性：
 
 - affected为缺省的受影响验证；收尾全量明确填full，绑定当前preflight的完整发现清单、范围和输入指纹，要求非空业务目标且不存在已审核独立test缺席
+- full计划保存发现清单内全部spec（含Setup）及其父链中fixtures目录的文件集合与SHA-256；目录增删文件也参与比对。非惯例fixture/helper目录通过可选code_roots字符串数组显式纳入。验收与报告重算当前内容，变化标为code_changed_after_full并判incomplete；旧计划缺指纹标为code_fingerprint_missing，原始执行回执仍保留
 - 采集预期与实际的(file,title,project)多重集合，比较缺失/多余目标、Setup和shard。skipped/notrun保留在目标集合中；集合齐全与业务通过分别记录，差集写入summary、Markdown及HTML
 - native_merge_required=true的run每个bundle必须绑定当前schema的Attempt计划。fully_accepted要求regression_completeness=complete，即使所有直接execution都通过也适用；未登记bundle、仅affected或缺目标/分片时均为incomplete，保留证据并阻止完整验收
 - not_declared仅用于native_merge_required缺省或false的旧run未声明用途的兼容记录。完整性相对于执行者提供的发现清单，仍须审阅真实发现命令及配置
 
-单次CLI只收一个有效Playwright blob。每个ZIP必须有可识别的onBlobReportMetadata，额外ZIP、未知格式或shard不符均拒绝；分片各用独立Attempt，command明确声明`--shard=N/T`，JSON和blob中的shard必须一致。全量收尾按同一发现清单和输入指纹汇总全部N=1…T分片的业务集合，每片保留自己的Setup；同一分片重跑使用新bundle ID，汇总采用该分片最新尝试并保留历史记录
+单次CLI只收一个有效Playwright blob。每个ZIP必须有可识别的onBlobReportMetadata，额外ZIP、未知格式或shard不符均拒绝；分片各用独立Attempt，command明确声明`--shard=N/T`，JSON和blob中的shard必须一致。全量收尾按同一发现清单、输入及代码指纹汇总全部N=1…T分片的业务集合，每片保留自己的Setup；同一分片重跑使用新bundle ID，汇总采用该分片最新尝试并保留历史记录
 
 ```sh
 python3 "$WF" attempt-bundle --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle cli-01
@@ -113,17 +114,25 @@ python3 "$WF" attempt-bundle --project "$PROJECT" --run "$RUN" --owner "$OWNER" 
 
 attempt-init拒绝覆盖已有attempt、越界scope、异常路径和符号链接。中断后保留plan与证据，诊断现有attempt，实际重跑换bundle ID；恢复造成来源marker/输入变化时，先明确审阅其证据归属。正常直接attempt-bundle；只有定位产物问题时用attempt-check，它不生成事件
 
+进程已退出且JSON/HTML/blob不齐的受控中断，用同一plan与真实command.json生成仅回执事件，再按返回的next_command调用record：
+
+```sh
+python3 "$WF" attempt-interrupted --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle cli-01 --reason "<实际中断原因>"
+```
+
+要求非零整数退出码、有效起止时间、计划/命令一致及文件摘要；--input可指定本attempt内的其他真实回执。完整产物继续走attempt-bundle/collect-results。interrupted_attempt单列于state、HTML、Markdown和timing，仅计CLI墙钟，测试时长保持null，不进入业务结果、full完整性或原生merge输入。计划和命令回执持续保留，资源恢复及配额释放仍依据实际状态；未观察到进程退出时先保留issue及现有证据，不造结束时间或退出码
+
 ## 只读耗时汇总
 
 ```sh
 python3 "$WF" timing --project "$PROJECT" --run "$RUN"
 ```
 
-不要求活跃租约，不写历史文件。输出工作流区间、已记录phase_time的分阶段并集、CLI区间总和/并集、每批result.duration总和/实际区间并集及未归因墙钟。并行result时长可超过CLI墙钟，差额用区间并集计算。已回收JSON的逐test数据保留null，现存JSON重核登记摘要；本命令不替代报告一致性核验
+不要求活跃租约，不写历史文件。输出工作流区间、已记录phase_time的分阶段并集、CLI区间总和/并集（含单列的interrupted仅回执调用）、每批result.duration总和/实际区间并集及未归因墙钟。并行result时长可超过CLI墙钟，差额用区间并集计算。已回收JSON及仅回执调用的逐test数据保留null，现存JSON与中断回执重核登记摘要；本命令不替代报告一致性核验
 
 来源时间从本run的`sources/*/observation.json`读取started_at/observed_at，按并集统计并行读取，不重读正文。phase_time可以粗粒度记录source/exploration/code/preparation/runner/finalization；沿用实际已有区间，不要求逐动作计时文件。各阶段可能重叠，不能相加解释为总耗时
 
-终态run优先使用原summary.generated_at作为观察终点，没有summary时用最后事件时间；活跃run使用当前时间。工作流外的会话边界缺省null。可选`--input`：
+终态run优先使用summary.report_generation.completed_at作为观察终点，旧报告回退到summary.generated_at，没有summary时用最后事件时间；活跃run使用当前时间。输出report_generation单列报告生成区间，完成采样不含最后summary落盘、stdout、释放租约及最终答复；summary.timing.wall_seconds仍保留原汇总取样口径。工作流外的会话边界缺省null；复盘时先核查当前宿主日志的实际请求、范围选择答复和最终交付时间，再提供证据支持的边界，无法恢复则保持null。可选`--input`：
 
 ```json
 {

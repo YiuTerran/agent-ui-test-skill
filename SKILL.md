@@ -17,9 +17,9 @@ description: Check current product requirements, ask the user which automation g
 
 1. 优先用一次`preflight`完成接管/续租、本地诊断和已提供来源观察/测试发现的差集汇总；已有run用`--run`，恢复用`--resume`。没有外部观察或发现清单时输出待检查项，按需补齐，不把本地文件存在当作来源新鲜或真实test发现。来源未变且快照完整时复用，不重读正文。
 2. 列出尚未完成自动化的总数、各模块数量和case/缺口原因，征询按模块新增、全部新增或本轮跳过新增；按模块选择时确认具体模块，记录答复原话、清单与范围。预期澄清与新增范围选择分别处理。
-3. 对获选缺口执行ego-browser探索→独立Playwright测试→受影响验证，同一探索者完成该场景代码；需求稳定、测试有效的case可并行回归。默认Agent上限4，浏览器探索与Playwright worker共享上限4，并按资源与冲突收紧。
+3. 对获选缺口执行ego-browser探索→独立Playwright测试→受影响验证，同一探索者完成该场景代码。新增共享fixture或复杂控件先用少量代表用例验证创建、交互、持久化和清理，再扩展同类case；已确认的产品差异保留需求断言。需求稳定、测试有效的case可并行回归。默认Agent上限4，浏览器探索与Playwright worker共享上限4，并按资源与冲突收紧。
 4. 首次回归前只调用一次`prepare-regression`，用`attempt-init`生成固定产物目录和输出参数，为真实CLI领取配额。CLI结束且teardown完成后释放配额，`attempt-bundle`从真实回执和产物生成事件，立即`collect-results`登记绑定。受影响验证标affected；收尾全量标full并绑定当前完整发现清单，核对实际目标集合及所有shard。
-5. 全部CLI完成后一次合并本轮Playwright HTML、将失败/重跑/未执行置前，一次`report`生成最终入口并释放配额和run。只在命令结果指出问题时做一次针对性诊断；相同输入不重复试错。
+5. 先完成受影响验证和脚本问题分流，再执行收尾全量；全量后修改fixture或测试时，先定向验证再补有必要的全量，不为已确认产品差异重复全量。全部CLI完成后一次合并本轮Playwright HTML、将失败/重跑/未执行置前，一次`report`生成最终入口并释放配额和run。只在命令结果指出问题时做一次针对性诊断；相同输入不重复试错。
 
 命令输出就是下一步输入。默认不单独调用`status`、`validate`、retention `plan/apply`或`import_results.py`；只有定位实际错误、手动预览/恢复或映射不明确时才使用。已有来源检查、发现清单、审批与runner证据直接引用，不重写成多份摘要。新增自动化范围、真实歧义、范围扩大或新增高风险写操作由用户决定。
 
@@ -34,6 +34,8 @@ description: Check current product requirements, ask the user which automation g
 
 首个获准新增的模块就绪即探索/编码。连续3次冗余、非业务本地调用均未推进任何已就绪工作时，停止重复协调，直接推进独立任务或针对已知阻塞处理；必要的初始化、来源核验、安全清理及有效诊断不计入。无需为此增加汇报或计时墙，外部等待和实际runner时间单列。
 
+CLI预算、无进展检查及受控中断按[执行预算与失败分流](references/reports.md#执行预算与失败分流)处理。
+
 ## 安全门禁（MUST）
 
 MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实际依赖或恢复需要时可调整，不弱化门禁。
@@ -43,7 +45,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 需求决定预期，浏览器说明实际行为。业务差异保留证据；业务代码修复需另有授权。
 - 既有业务数据只读。专用E2E资源按intent→准确ID/owned证明→逆依赖清理→absence check处理；未知创建结果不得重试或猜测删除。
 - 独立case并行、共享资源按账号/组织/配置/数据冲突组局部串行。执行前领取共享配额，teardown后释放；资源信息不足从一个浏览器任务开始。
-- 新run的`native_merge_required=true`：每个bundle必须绑定当前schema的Attempt计划及摘要，每次CLI必须有原始JSON和blob，正常同时生成HTML；完整绑定Setup、业务case、retry及未执行结果，最终合并全部blob并核验。JSON-only保留为旧run的受限兼容路径。失败、重跑后通过及未执行置前，不以缺失证据推断通过。
+- 新run的`native_merge_required=true`：每个结果bundle必须绑定当前schema的Attempt计划及摘要、原始JSON和blob，正常同时生成HTML；完整绑定Setup、业务case、retry及未执行结果，最终合并全部结果blob并核验。中断产物不齐的调用独立登记仅回执，不计结果或完整性。JSON-only保留为旧run的受限兼容路径。失败、重跑后通过及未执行置前，不以缺失证据推断通过。
 - 新Attempt仅允许追加固定reporter/output参数，执行选择条件进入计划command。新run的完整验收必须满足`regression_completeness=complete`，覆盖绑定完整发现清单的收尾full及全部目标/分片；业务结果另行核验。缺少计划、full或目标时阻止完整验收，`not_declared`仅用于旧run；完整发现声明仍需真实命令审阅。
 - 每轮执行前回收相关模块旧报告；只自动删除缓存白名单内安全归属明确的产物，保护当前run、有效审批/baseline及未核清资源恢复证据。回收记录不能改写历史结论。
 - 明确区分覆盖与执行、UI与API、模拟与真机、local与CI。未知计时记`null`，不把等待空档归因为测试时间。

@@ -254,7 +254,8 @@ def attempt_init(wf, project, args):
         cwd = project if request['cwd'] == '.' else wf.safe_path(project, request['cwd'])
         wf.check(cwd.is_dir(), 'attempt cwd must be a project directory')
         relative, directory = attempt_plan(wf, project, args, state)
-        wf.check(args.bundle not in state.get('report_bundles', {}), 'bundle ID is already registered')
+        wf.check(args.bundle not in state.get('report_bundles', {})
+                 and args.bundle not in state.get('interrupted_attempts', {}), 'bundle ID is already registered')
         plan = {key: request[key] for key in ('command', 'scope', 'setup_projects', 'cwd', 'environment')}
         mode = request.get('regression_mode', 'affected')
         wf.check(mode in {'affected', 'full'}, 'regression_mode must be affected or full')
@@ -276,6 +277,10 @@ def attempt_init(wf, project, args):
             wf.check(wf.hashlib.sha256(path.read_bytes()).hexdigest() == inventory['sha256'],
                      'discovery changed after preflight')
             plan['discovery'] = inventory
+            roots = request.get('code_roots', [])
+            string_array(wf, roots, 'code_roots')
+            plan['code_snapshot'] = wf.report_artifacts.discovered_code_snapshot(
+                project, wf.load(path), plan['setup_projects'], roots)
         plan['shard'] = wf.report_artifacts.command_shard(plan['command'])
         plan.update(bundle_id=args.bundle, run_id=state['run_id'], schema_version=2,
                     planned_at=wf.now(),
@@ -309,6 +314,7 @@ def attempt_init(wf, project, args):
 
 def checked_attempt(wf, project, args, state, spec, cov):
     relative, directory = attempt_plan(wf, project, args, state)
+    wf.check(args.bundle not in state.get('interrupted_attempts', {}), 'bundle ID registered as interrupted')
     plan = wf.load(directory / 'plan.json')
     wf.check(plan['run_id'] == state['run_id'] and plan['bundle_id'] == args.bundle, 'attempt plan identity mismatch')
     wf.check(plan['freshness_marker'] == state['freshness_marker']
@@ -364,6 +370,36 @@ def attempt_finish(wf, project, args):
             result['next_command'] = ['collect-results', '--project', str(project), '--run', args.run,
                                       '--owner', args.owner, '--input', str(path)]
         return result
+
+
+def attempt_interrupted(wf, project, args):
+    with wf.project_lock(project):
+        state = run_state(wf, project, args, owned=True, active=True)
+        relative, directory = attempt_plan(wf, project, args, state)
+        wf.check(args.bundle not in state.get('report_bundles', {}), 'bundle ID already has runner results')
+        receipt_path = args.input or relative + '/command.json'
+        receipt = wf.load(wf.safe_path(project, receipt_path))
+        attempt = {key: receipt.get(key) for key in ('command', 'cwd', 'environment', 'scope', 'setup_projects',
+                                                    'started_at', 'ended_at', 'exit_code')}
+        attempt.update(bundle_id=args.bundle, run_id=args.run, status='interrupted', reason=args.reason,
+                       attempt_plan=relative + '/plan.json', command_receipt=receipt_path)
+        for key in ('attempt_plan', 'command_receipt'):
+            attempt[key + '_sha256'] = wf.hashlib.sha256(wf.safe_path(project, attempt[key]).read_bytes()).hexdigest()
+        wf.no_secrets(attempt)
+        wf.report_artifacts.inspect_interrupted_attempt(project, args.run, attempt)
+        wf.check(wf.dt(attempt['ended_at']) <= wf.dt(wf.now()), 'interrupted receipt cannot be in the future')
+        event = {'type': 'interrupted_attempt', 'attempt': attempt,
+                 'evidence': [attempt['attempt_plan'], attempt['command_receipt']]}
+        path = directory / 'interrupted-event.json'
+        if path.exists():
+            wf.check(wf.load(path) == event, 'refusing to overwrite a different interruption event')
+        else:
+            wf.atomic(path, event, exclusive=True)
+        return {'valid': True, 'committed': False, 'bundle_id': args.bundle,
+                'input': path.relative_to(project).as_posix(), 'next_command': [
+                    'record', '--project', str(project), '--run', args.run, '--owner', args.owner,
+                    '--input', str(path)],
+                'note': 'Receipt only; no runner results, full coverage or resource cleanup are inferred.'}
 
 
 def clipped(wf, intervals, start, end):
@@ -497,8 +533,9 @@ def timing(wf, project, args):
     state = run_state(wf, project, args)
     summary_path = wf.run_path(project, args.run) / 'summary.json'
     saved = wf.load(summary_path) if summary_path.exists() else {}
+    report_generation = saved.get('report_generation')
     if state['acceptance'] in wf.TERMINAL:
-        end_text = saved.get('generated_at') or max(
+        end_text = (report_generation or {}).get('completed_at') or saved.get('generated_at') or max(
             [state['created_at']] + [e['at'] for e in state['events']], key=wf.dt)
     else:
         end_text = wf.now()
@@ -531,6 +568,15 @@ def timing(wf, project, args):
                        unattributed_wall_seconds=max(0, (b-a).total_seconds()-measured) if complete else None,
                        results=len(results))
         runners.append(row)
+    for bid, attempt in state.get('interrupted_attempts', {}).items():
+        wf.report_artifacts.inspect_interrupted_attempt(project, state['run_id'], attempt)
+        a, b = wf.dt(attempt['started_at']), wf.dt(attempt['ended_at'])
+        invocations.append((a.isoformat(), b.isoformat()))
+        runners.append({'bundle_id': bid, 'status': 'interrupted', 'receipt_only': True,
+                        'started_at': attempt['started_at'], 'ended_at': attempt['ended_at'],
+                        'exit_code': attempt['exit_code'], 'invocation_seconds': (b-a).total_seconds(),
+                        'result_duration_sum_seconds': None, 'result_interval_union_seconds': None,
+                        'unattributed_wall_seconds': None, 'raw_available': False})
     for event in state.get('phase_times', []):
         wf.check(wf.dt(event['started_at']) <= wf.dt(event['ended_at']), 'phase ends before start')
         phase_intervals.setdefault(event['phase'], []).append((event['started_at'], event['ended_at']))
@@ -549,7 +595,12 @@ def timing(wf, project, args):
             source_intervals.append((a.isoformat(), b.isoformat()))
         source_rows.append(row)
     request = input_object(wf, args)
-    known = clipped(wf, invocations + source_intervals
+    report_intervals = []
+    if report_generation:
+        a, b = wf.dt(report_generation['started_at']), wf.dt(report_generation['completed_at'])
+        wf.check(start <= a <= b <= end, 'invalid report generation interval')
+        report_intervals.append((a.isoformat(), b.isoformat()))
+    known = clipped(wf, invocations + source_intervals + report_intervals
                     + [v for values in phase_intervals.values() for v in values], start, end)
     return {'run_id': args.run, 'workflow': {'started_at': start.isoformat(), 'observed_until': end.isoformat(),
              'wall_seconds': wall, 'known_interval_union_seconds': wf.union_seconds(known),
@@ -557,6 +608,7 @@ def timing(wf, project, args):
             'runner_invocation_sum_seconds': sum(r['invocation_seconds'] for r in runners),
             'runner_interval_union_seconds': wf.union_seconds(invocations),
             'phases_union_seconds': phases, 'runners': runners, 'session': host_timing(wf, project, request),
+            'report_generation': report_generation,
             'source_observations': source_rows,
             'source_read_interval_union_seconds': wf.union_seconds(source_intervals) if source_intervals else None,
             'model_cpu_seconds': None, 'network_wait_seconds': None,
@@ -575,4 +627,6 @@ def dispatch(api, project, args):
         return attempt_init(wf, project, args)
     if args.command in {'attempt-check', 'attempt-bundle'}:
         return attempt_finish(wf, project, args)
+    if args.command == 'attempt-interrupted':
+        return attempt_interrupted(wf, project, args)
     return timing(wf, project, args)

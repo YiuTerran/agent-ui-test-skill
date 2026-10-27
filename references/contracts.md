@@ -17,13 +17,14 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 | `attempt-init --run RUN --owner NAME --bundle ID --input FILE` | 按真实计划创建新attempt与输出参数；无执行时间/退出码，不执行CLI，拒绝覆盖 |
 | `attempt-bundle/attempt-check --run RUN --owner NAME --bundle ID [--input FILE]` | 核对真实command.json与JSON/HTML/blob；bundle排他生成事件供collect-results，check仅诊断，不登记执行 |
 | `timing --run RUN [--input FILE]` | 只读区间及宿主计数汇总，不修改历史；未知保留null，重叠时间不重复相加 |
-| `schema --type execution`或`schema --type report_bundle` | 从技能`assets/events.schema.json`输出实际输入形状，无需`--project`；不是输入验证器，不代替运行时来源/审批/证据门禁 |
+| `schema --type execution/report_bundle/interrupted_attempt` | 从技能`assets/events.schema.json`输出实际输入形状，无需`--project`；不是输入验证器，不代替运行时来源/审批/证据门禁 |
 | `start --owner NAME [--scopes a,b]` | 获取/恢复唯一兼容未完成run；多个匹配时显式选择。NAME为主任务独有且稳定标识，scope只能取固定范围子集 |
 | `start --resume RUN [--reclaim --reason TEXT]` | 中断恢复；其他owner占用只有过期且显式reclaim才可接管，活跃租约拒绝。已release可接管，仍须恢复核对 |
 | `start --new-round --owner NAME` | 与`--resume`互斥；同owner兼容旧run无running任务时结束旧轮、承接未决义务；其他owner须先显式接管 |
 | `renew --run RUN --owner NAME` | 仅续当前有效租约；保留freshness_marker/source_checks。配置/coverage变化、旧格式无配置指纹、过期或终态须显式恢复 |
 | `record --run RUN --owner NAME [--writer TASK_WRITER] --input FILE` | FILE为单事件或非空数组；整批验证后提交。委派writer只能更新预先分配给自己的task，不能扩大case/source或修改主run决策 |
 | `prepare-regression --run RUN --owner NAME [--scopes a,b]` | 首次回归前一次安全plan+apply，保护当前run；不运行测试。后续复用，扩scope补预检；详见[回收](#运行历史回收) |
+| `attempt-interrupted --run RUN --owner NAME --bundle ID --reason TEXT` | 生成中断CLI的仅回执事件，按返回路径record；不要求JSON/blob，不产生执行结果 |
 | `collect-results --run RUN --owner NAME --input FILE` | FILE为一个report_bundle事件；主owner原子登记bundle与精确映射的execution。失败state不变，原文件保留；不自动批准、清理或验收 |
 | `status --run RUN [--brief或--full]` | 读取本地状态、推导阻塞/后续动作，不读取远端来源或通知用户；默认完整以兼容既有调用 |
 | `validate [--run RUN]` | 检查资产结构、路径、指纹和已提供证据；有run则重核绑定。`valid`不证明业务覆盖或验收；无run返回missing_configuration |
@@ -168,15 +169,16 @@ Schema已编码blocked_by出现时的notrun/runner_result=skip/reason条件，�
 
 usage仅唯一根项明确coverage=complete_run且有coverage_description说明全部执行者/阶段范围时给整轮totals；其他根项、覆盖关系或指标缺失则整轮总量null，partial根项去重小计放recorded_subtotals。主Agent须核对声明与真实宿主范围，脚本不能发现漏报。人等按human事件区间并集，裁剪至run开始后。
 
-### report_bundle、merged_report、acceptance
+### report_bundle、interrupted_attempt、merged_report、acceptance
 
 | 事件 | 必填字段 | 条件/可选字段与值 | 门禁 |
 | --- | --- | --- | --- |
 | `report_bundle` | bundle对象 | 完整字段表与示例见[报告绑定](reports.md#绑定与校验)；bundle_id在run内唯一、scope属于本run | 文件位于本次attempt；登记保存SHA-256，后续逐slot绑定；兼容旧回执不等于新执行可不绑定 |
-| `merged_report` | report.html_report、bundle_ids、command、started_at、ended_at、exit_code | 主owner登记实际离线merge，exit_code=0；输入为所有bundle的blob_reports | bundle_ids恰好覆盖本轮全部CLI；比较原始JSON全部尝试与合并HTML/附件，保存输入ZIP及输出摘要；新增CLI须重新合并 |
+| `interrupted_attempt` | attempt对象 | attempt-interrupted从真实plan/命令回执生成，字段形状用schema --type interrupted_attempt查看 | 非零退出码、实际时间、计划/命令及摘要一致；独立ID，仅纳入报告与CLI计时，不含测试结果 |
+| `merged_report` | report.html_report、bundle_ids、command、started_at、ended_at、exit_code | 主owner登记实际离线merge，exit_code=0；输入为所有bundle的blob_reports | bundle_ids恰好覆盖本轮全部结果bundle；比较原始JSON全部尝试与合并HTML/附件，保存输入ZIP及输出摘要；新增CLI须重新合并 |
 | `acceptance` | status、owner | status=`in_progress/blocked/partially_accepted/fully_accepted/completed_with_failures/partially_blocked/aborted`；reason、evidence可选 | owner必须主owner；终态为fully_accepted/completed_with_failures/partially_blocked/aborted；资源残留阻止fully_accepted |
 
-新run固定`native_merge_required=true`，每个bundle必须绑定当前schema的Attempt计划，每次CLI必须JSON+非空blob_reports，正常同时HTML；最终必须登记并核验覆盖全部CLI的原生合并。旧run缺标志按false兼容，缺blob/JSON-only只作历史限制，不能用于新run或冒称原生合并已完成。
+新run固定`native_merge_required=true`，每个结果bundle必须绑定当前schema的Attempt计划及JSON+非空blob_reports，正常同时HTML；最终登记并核验全部结果bundle的原生合并。中断产物不齐的调用独立登记interrupted_attempt，不进入merge或完整性证明。旧run缺标志按false兼容，缺blob/JSON-only只作历史限制，不能冒称新执行结果完整或原生合并已完成。
 
 fully_accepted还必须同时满足：
 

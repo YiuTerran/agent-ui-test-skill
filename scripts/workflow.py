@@ -568,12 +568,14 @@ def status(project, state, spec, cov, full=True, include_history=True):
     return {key: result[key] for key in keys}
 
 
-def require_evidence(project, event, allow_recycled=False):
+def require_evidence(project, event, allow_recycled=False, recycled_paths=None):
     evidence = event.get('evidence', [])
     check(isinstance(evidence, list), 'evidence must be a list')
-    for item in evidence:
-        check(safe_path(project, item).is_file() or (allow_recycled and retention.is_recycled(project, item)),
-              'evidence file missing: ' + item)
+    missing = [item for item in evidence if not safe_path(project, item).is_file()]
+    if recycled_paths is None:
+        recycled_paths = retention.recycled_paths(project, missing) if allow_recycled and missing else set()
+    for item in missing:
+        check(allow_recycled and item in recycled_paths, 'evidence file missing: ' + item)
 
 
 def record_event(project, state, spec, cov, event, context=None):
@@ -843,6 +845,7 @@ def record_event(project, state, spec, cov, event, context=None):
         bundle = event.get('bundle', {})
         bid = bundle.get('bundle_id')
         check(bid not in state.get('report_bundles', {}), 'report bundle ID already registered; create a new invocation')
+        check(bid not in state.get('interrupted_attempts', {}), 'bundle ID registered as interrupted')
         check(isinstance(bundle.get('scope'), list) and set(bundle['scope']) <= set(state['scopes']), 'report scope outside run')
         if state.get('native_merge_required', False):
             check(isinstance(bundle.get('blob_reports'), list) and bundle['blob_reports'],
@@ -856,6 +859,15 @@ def record_event(project, state, spec, cov, event, context=None):
                   and inputs['asset_fingerprint'] == fingerprint(cov)
                   and not state.get('recovery_required'), 'attempt inputs differ from the current reviewed run')
         state.setdefault('report_bundles', {})[bid] = checked
+    elif kind == 'interrupted_attempt':
+        attempt = event.get('attempt', {})
+        bid = attempt.get('bundle_id')
+        check(bid not in state.get('report_bundles', {}) and bid not in state.get('interrupted_attempts', {}),
+              'interrupted bundle ID already registered')
+        checked = report_artifacts.inspect_interrupted_attempt(project, state['run_id'], attempt)
+        check(set(checked['scope']) <= set(state['scopes']), 'interrupted scope outside run')
+        check(dt(checked['ended_at']) <= dt(now()), 'interrupted receipt cannot be in the future')
+        state.setdefault('interrupted_attempts', {})[bid] = checked
     elif kind == 'merged_report':
         state['merged_report'] = report_artifacts.inspect_merged_report(
             project, state['run_id'], state.get('report_bundles', {}), event.get('report'))
@@ -891,9 +903,10 @@ def record_event(project, state, spec, cov, event, context=None):
         if event['status'] == 'fully_accepted':
             native = state.get('native_merge_required', False)
             regression = report_artifacts.regression_completeness(
-                state.get('report_bundles', {}), state['scopes'], required=native)
+                state.get('report_bundles', {}), state['scopes'], required=native, project=project)
             check(regression['status'] == 'complete' if native else regression['status'] != 'incomplete',
-                  'full acceptance requires complete final-regression targets and all planned shards')
+                  'full acceptance requires complete final-regression targets, current code and all planned shards: '
+                  + json.dumps(regression, ensure_ascii=False))
             if state.get('report_bundles'):
                 check(report_consistency(project, state)['status'] == 'checked', 'full acceptance requires consistent complete report receipts')
             view = status(project, state, spec, cov)
@@ -944,16 +957,37 @@ def case_results(project, state, cov):
     return results
 
 
-def report_consistency(project, state):
+def report_recycled_paths(project, state):
+    paths = set()
+    reports = list(state.get('report_bundles', {}).values())
+    if state.get('merged_report'):
+        reports.append(state['merged_report'])
+    for report in reports:
+        paths.update(report.get('artifact_sha256', {}))
+        paths.update(report[k] for k in ('execution_result', 'html_report') if report.get(k))
+    for execution in state['executions']:
+        paths.update(execution.get('evidence', []))
+        paths.update(execution.get('failure_details', {}).get('evidence', []))
+    return retention.recycled_paths(project, paths)
+
+
+def report_consistency(project, state, recycled_paths=None):
     project = Path(project).resolve()
+    if recycled_paths is None:
+        recycled_paths = report_recycled_paths(project, state)
     bundles = state.get('report_bundles', {})
     errors, recycled, recycled_merged = [], [], []
+    for bid, attempt in state.get('interrupted_attempts', {}).items():
+        try:
+            report_artifacts.inspect_interrupted_attempt(project, state['run_id'], attempt)
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            errors.append('interrupted_attempt ' + bid + ': ' + str(error))
     for bid, bundle in bundles.items():
         try:
             if state.get('native_merge_required', False):
                 check(bundle.get('blob_reports'), 'native blob report missing for current invocation')
                 check(bundle.get('attempt_plan'), 'native invocation requires its attempt plan binding')
-            recovered = [p for p in bundle.get('artifact_sha256', {}) if retention.is_recycled(project, p)]
+            recovered = [p for p in bundle.get('artifact_sha256', {}) if p in recycled_paths]
             if recovered:
                 check(state['acceptance'] in TERMINAL, 'active run cannot use recycled report evidence')
                 for path, expected_hash in bundle['artifact_sha256'].items():
@@ -980,7 +1014,7 @@ def report_consistency(project, state):
     merged = state.get('merged_report')
     if merged:
         try:
-            recovered = [p for p in merged['artifact_sha256'] if retention.is_recycled(project, p)]
+            recovered = [p for p in merged['artifact_sha256'] if p in recycled_paths]
             if recovered:
                 check(state['acceptance'] in TERMINAL, 'active run cannot use recycled merged report')
                 for path, expected_hash in merged['artifact_sha256'].items():
@@ -998,7 +1032,7 @@ def report_consistency(project, state):
           or any(bundle.get('blob_reports') for bundle in bundles.values())):
         errors.append('merged_report: native merge required before final report')
     unbound = any(not e.get('bundle_id') for e in state['executions'])
-    return {'status': 'failed' if errors else ('recycled' if recycled or recycled_merged else ('partial' if bundles and unbound else ('checked' if bundles else 'unregistered'))),
+    return {'status': 'failed' if errors else ('recycled' if recycled or recycled_merged else ('partial' if bundles and unbound else ('checked' if bundles else ('receipt_only' if state.get('interrupted_attempts') else 'unregistered')))),
             'errors': errors,
             'recycled_bundles': recycled,
             'recycled_merged_reports': recycled_merged,
@@ -1006,7 +1040,9 @@ def report_consistency(project, state):
             'note': 'Artifact consistency does not prove business expectations or actual command provenance.'}
 
 
-def failure_markdown(state, cov, project):
+def failure_markdown(state, cov, project, recycled_paths=None):
+    if recycled_paths is None:
+        recycled_paths = report_recycled_paths(project, state)
     lines = ['', '## 失败与未执行详情', '']
     problem = [e for e in state['executions'] if e['result'] in {'fail', 'notrun', 'skip'}]
     if not problem:
@@ -1030,14 +1066,16 @@ def failure_markdown(state, cov, project):
         elif execution.get('reason'):
             lines += ['- 原因：' + execution['reason']]
         evidence = sorted(set(execution.get('evidence', []) + detail.get('evidence', [])))
-        links = [('已按保留策略回收：' + value if retention.is_recycled(project, value)
+        links = [('已按保留策略回收：' + value if value in recycled_paths
                   else '[' + Path(value).name + '](<' + str(safe_path(project, value)) + '>)') for value in evidence]
         lines += ['- 证据：' + (', '.join(links) if links else '未提供，待补充'), '']
     return lines
 
 
-def summary(project, state, spec, cov):
+def summary(project, state, spec, cov, recycled_paths=None):
     generated = now()
+    if recycled_paths is None:
+        recycled_paths = report_recycled_paths(project, state)
     business = [item for item in state['executions'] if not item['setup']]
     setup = [item for item in state['executions'] if item['setup']]
     results = case_results(project, state, cov)
@@ -1085,17 +1123,18 @@ def summary(project, state, spec, cov):
             'source_observations': state['source_checks'],
             'automation_expansion': expansion_view(project, state, cov),
             'report_bundles': state.get('report_bundles', {}),
+            'interrupted_attempts': state.get('interrupted_attempts', {}),
             'merged_report': state.get('merged_report'),
             'native_merge_required': state.get('native_merge_required', False),
             'report_paths': {'human_report': 'test/.cache/runs/' + state['run_id'] + '/report.md',
                              'machine_report': 'test/.cache/runs/' + state['run_id'] + '/summary.json',
                              'review_html': 'test/.cache/runs/' + state['run_id'] + '/report.html',
                              'merged_html': (state['merged_report']['html_report'] if state.get('merged_report') and
-                                             not retention.is_recycled(project, state['merged_report']['html_report']) else None)},
-            'report_consistency': report_consistency(project, state),
+                                             state['merged_report']['html_report'] not in recycled_paths else None)},
+            'report_consistency': report_consistency(project, state, recycled_paths),
             'regression_completeness': report_artifacts.regression_completeness(
                 state.get('report_bundles', {}), state['scopes'],
-                required=state.get('native_merge_required', False)),
+                required=state.get('native_merge_required', False), project=project),
             'performance': {'source_cache_hits': sum(v.get('cache_hit') is True for v in state['source_checks'].values()),
                             'source_observations': len(state['source_checks']),
                             'regression_preflight': state.get('regression_preflight')},
@@ -1406,13 +1445,13 @@ def doctor(project):
 
 def event_schema(event_type):
     document = load(Path(__file__).resolve().parent.parent / 'assets/events.schema.json')
-    check(event_type in document['$defs'], 'unknown schema type; use execution or report_bundle')
+    check(event_type in document['$defs'], 'unknown schema type; use execution, report_bundle or interrupted_attempt')
     return {'$schema': document['$schema'], **document['$defs'][event_type]}
 
 
 def main(argv=None):
     parser = JsonArgumentParser(description=__doc__)
-    helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'timing'}
+    helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'attempt-interrupted', 'timing'}
     parser.add_argument('command', choices=['doctor', 'schema', 'init', 'start', 'renew', 'prepare-regression', 'collect-results', 'record', 'status', 'validate', 'report', 'release', *sorted(helpers)])
     parser.add_argument('--project')
     parser.add_argument('--type', dest='event_type')
@@ -1555,9 +1594,15 @@ def main(argv=None):
                         errors = asset_errors(project, spec, cov)
                         if state['asset_fingerprint'] != fingerprint(cov):
                             errors.append('coverage asset changed; recovery review required')
+                        historical_paths = [item for event in state['events']
+                                            if isinstance(event.get('evidence', []), list)
+                                            for item in event.get('evidence', []) if isinstance(item, str)]
+                        recycled_paths = (retention.recycled_paths(project, historical_paths)
+                                          if state['acceptance'] in TERMINAL else set())
                         for event in state['events']:
                             try:
-                                require_evidence(project, event, allow_recycled=state['acceptance'] in TERMINAL)
+                                require_evidence(project, event, allow_recycled=state['acceptance'] in TERMINAL,
+                                                 recycled_paths=recycled_paths)
                             except ValueError as error:
                                 errors.append(str(error))
                         consistency = report_consistency(project, state)
@@ -1565,8 +1610,9 @@ def main(argv=None):
                         result = {'valid': not errors, 'errors': errors, 'report_consistency': consistency,
                                   'status': status(project, state, spec, cov)}
                     else:
-                        result = summary(project, state, spec, cov)
-                        atomic(directory / 'summary.json', result)
+                        report_started = now()
+                        recycled_paths = report_recycled_paths(project, state)
+                        result = summary(project, state, spec, cov, recycled_paths)
                         atomic(directory / 'report.html', report_artifacts.review_html(
                             project, state, result['report_consistency']))
                         lines = ['# E2E Run ' + state['run_id'], '', 'Acceptance: ' + state['acceptance'],
@@ -1577,12 +1623,12 @@ def main(argv=None):
                                 project, result['report_paths']['merged_html'])) + '>)', '']
                         for bid, bundle in result['report_bundles'].items():
                             raw = str(safe_path(project, bundle['execution_result']))
-                            raw_label = ('原始JSON已按保留策略回收：' + raw if retention.is_recycled(project, bundle['execution_result'])
+                            raw_label = ('原始JSON已按保留策略回收：' + raw if bundle['execution_result'] in recycled_paths
                                          else '[原始JSON](<' + raw + '>)')
                             lines += ['- ' + bid + '：' + raw_label + '；HTML来源：' + bundle['html_origin']]
                             if bundle.get('html_report'):
                                 html_path = bundle['html_report']
-                                lines += [('  - HTML报告已按保留策略回收：' + html_path if retention.is_recycled(project, html_path)
+                                lines += [('  - HTML报告已按保留策略回收：' + html_path if html_path in recycled_paths
                                            else '  - [HTML报告](<' + str(safe_path(project, html_path)) + '>)')]
                             if bundle.get('rebuild_note'):
                                 lines += ['  - 重建说明：' + bundle['rebuild_note']]
@@ -1591,8 +1637,16 @@ def main(argv=None):
                                   json.dumps(result['automation_expansion'], ensure_ascii=False, indent=2), '```']
                         lines += ['', '## 收尾全量目标集合', '', '```json',
                                   json.dumps(result['regression_completeness'], ensure_ascii=False, indent=2), '```']
-                        lines += failure_markdown(state, cov, project)
-                        lines += ['', '## Counts', '', '```json', json.dumps(result['counts'], indent=2), '```', '', '## Timing and Usage', '', '```json', json.dumps({'timing': result['timing'], 'usage': result['usage']}, indent=2), '```', '', '## Cases', '']
+                        lines += ['', '## 中断调用（仅回执）', '',
+                                  '以下调用仅计入CLI墙钟，不计测试结果或全量完整性；资源状态另行核实。', '']
+                        for bid, attempt in result['interrupted_attempts'].items():
+                            lines += ['- ' + bid + ': ' + attempt['started_at'] + ' → ' + attempt['ended_at']
+                                      + '; exit=' + str(attempt['exit_code']) + '; ' + attempt['reason']
+                                      + '；[命令回执](<' + str(safe_path(project, attempt['command_receipt'])) + '>)']
+                        lines += failure_markdown(state, cov, project, recycled_paths)
+                        lines += ['', '## Counts', '', '```json', json.dumps(result['counts'], indent=2), '```', '', '## Timing and Usage', '',
+                                  '报告生成完成采样在本正文写出后记录，见summary.json的report_generation；此处timing为汇总取样口径。', '',
+                                  '```json', json.dumps({'timing': result['timing'], 'usage': result['usage']}, indent=2), '```', '', '## Cases', '']
                         lines += ['| Case | Result | Code Coverage | Plan | Exploration | Code |', '| --- | --- | --- | --- | --- | --- |']
                         for cid, data in result['cases'].items():
                             action = data['action'] or {}
@@ -1614,6 +1668,12 @@ def main(argv=None):
                         atomic(directory / 'report.md', '\n'.join(lines) + '\n')
                         state['claim']['renewed_at'] = now()
                         atomic(path, state)
+                        report_completed = now()
+                        result['report_generation'] = {
+                            'started_at': report_started, 'completed_at': report_completed,
+                            'wall_seconds': (dt(report_completed) - dt(report_started)).total_seconds(),
+                            'boundary': 'report bodies and renewed state written; before final summary write and stdout'}
+                        atomic(directory / 'summary.json', result)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 2 if result.get('valid') is False or result.get('report_consistency', {}).get('status') == 'failed' else 0
     except (ValueError, KeyError, TypeError, AttributeError, IndexError, OSError) as error:

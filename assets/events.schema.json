@@ -7,6 +7,9 @@
     },
     {
       "$ref": "#/$defs/report_bundle"
+    },
+    {
+      "$ref": "#/$defs/interrupted_attempt"
     }
   ],
   "$defs": {
@@ -438,6 +441,125 @@
               }
             }
           ]
+        }
+      }
+    },
+    "interrupted_attempt": {
+      "type": "object",
+      "description": "Receipt-only interrupted CLI; no test results or full-regression evidence are inferred. Runtime verifies the plan, actual command receipt and digests.",
+      "required": [
+        "type",
+        "attempt"
+      ],
+      "properties": {
+        "type": {
+          "const": "interrupted_attempt"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "attempt": {
+          "type": "object",
+          "required": [
+            "bundle_id",
+            "run_id",
+            "reason",
+            "attempt_plan",
+            "attempt_plan_sha256",
+            "command_receipt",
+            "command_receipt_sha256",
+            "cwd",
+            "environment",
+            "started_at",
+            "ended_at",
+            "status",
+            "exit_code",
+            "command",
+            "scope",
+            "setup_projects"
+          ],
+          "properties": {
+            "bundle_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "run_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_plan": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_plan_sha256": {
+              "type": "string",
+              "minLength": 1
+            },
+            "command_receipt": {
+              "type": "string",
+              "minLength": 1
+            },
+            "command_receipt_sha256": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cwd": {
+              "type": "string",
+              "minLength": 1
+            },
+            "environment": {
+              "type": "string",
+              "minLength": 1
+            },
+            "started_at": {
+              "type": "string",
+              "minLength": 1,
+              "format": "date-time"
+            },
+            "ended_at": {
+              "type": "string",
+              "minLength": 1,
+              "format": "date-time"
+            },
+            "status": {
+              "const": "interrupted"
+            },
+            "exit_code": {
+              "type": "integer",
+              "not": {
+                "const": 0
+              }
+            },
+            "command": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "scope": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "setup_projects": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         }
       }
     }

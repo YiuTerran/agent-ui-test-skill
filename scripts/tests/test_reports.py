@@ -115,6 +115,36 @@ class ReportTest(unittest.TestCase):
         self.assertFalse(result['global_residuals_checked'])
         self.assertNotIn('regression_inventory', result)
 
+    def test_report_scans_retention_once_and_records_output_boundary(self):
+        self.start()
+        self.check_sources()
+        bundle, raw = self.collectable()
+        result = raw['suites'][0]['specs'][0]['tests'][0]['results'][0]
+        attachment = str(Path(bundle['html_report']).parent / 'data/readback.json')
+        self.write(attachment, {'actual': 'synthetic'})
+        result['attachments'] = [{'name': 'readback', 'path': str(self.project / attachment),
+                                  'contentType': 'application/json'}]
+        self.write(bundle['execution_result'], raw)
+        def html_attachment(index, tests):
+            tests[0]['results'][0]['attachments'][0]['path'] = 'data/readback.json'
+        self.html(bundle, raw, mutate=html_attachment)
+        self.collect(bundle)
+        with mock.patch.object(wf.retention, 'manifests', wraps=wf.retention.manifests) as scans:
+            summary = self.report()
+        self.assertEqual(1, scans.call_count)
+        self.assertEqual('checked', summary['report_consistency']['status'])
+        generation = summary['report_generation']
+        self.assertLessEqual(wf.dt(generation['started_at']), wf.dt(summary['generated_at']))
+        self.assertLessEqual(wf.dt(summary['generated_at']), wf.dt(generation['completed_at']))
+        self.assertEqual((wf.dt(generation['completed_at']) - wf.dt(generation['started_at'])).total_seconds(),
+                         generation['wall_seconds'])
+        directory = self.project / 'test/.cache/runs' / self.run
+        self.assertTrue((directory / 'report.html').is_file())
+        self.assertTrue((directory / 'report.md').is_file())
+        self.assertEqual(summary, json.loads((directory / 'summary.json').read_text(encoding='utf-8')))
+        self.write(attachment, {'actual': 'changed'})
+        self.cli('report', '--run', self.run, '--owner', self.owner, fail=True)
+
     def test_collect_registers_all_retries_atomically_and_is_idempotent(self):
         self.start()
         self.check_sources()

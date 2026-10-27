@@ -7,8 +7,10 @@ import html
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import zipfile
 from urllib.parse import quote
 
@@ -229,6 +231,88 @@ def target_difference(expected, actual):
     return {'missing': rows(expected-actual), 'unexpected': rows(actual-expected)}
 
 
+def code_path(project, value):
+    platform_support.relative_parts(value)
+    root = project.resolve()
+    path = root / value
+    for part in (path, *path.parents):
+        if part == root:
+            break
+        check(not part.is_symlink() and not (
+            part.exists() and getattr(part.lstat(), 'st_file_attributes', 0) & 0x400),
+            'code snapshot cannot follow symlinks or reparse points: ' + value)
+    check(path.resolve().is_relative_to(root), 'code snapshot outside project')
+    return path
+
+
+def code_snapshot(project, specs, roots):
+    """Hash discovered specs and full fixture/extra trees, including their file sets."""
+    def unreadable(error):
+        raise error
+
+    files = set(specs)
+    for relative in roots:
+        directory = code_path(project, relative)
+        if not directory.exists():
+            continue
+        check(directory.is_dir(), 'code snapshot root must be a directory: ' + relative)
+        for parent, dirs, names in os.walk(directory, followlinks=False, onerror=unreadable):
+            for name in dirs + names:
+                path = Path(parent, name)
+                value = path.relative_to(project.resolve()).as_posix()
+                code_path(project, value)
+                if name in names:
+                    files.add(value)
+    hashes = {}
+    for value in sorted(files):
+        path = code_path(project, value)
+        check(path.is_file() and stat.S_ISREG(path.stat().st_mode), 'code snapshot file missing or nonregular: ' + value)
+        hashes[value] = hashlib.sha256(path.read_bytes()).hexdigest()
+    snapshot = {'specs': sorted(set(specs)), 'roots': sorted(set(roots)), 'files': hashes}
+    snapshot['sha256'] = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+    return snapshot
+
+
+def discovered_code_snapshot(project, raw, setup_projects, extra_roots=()):
+    root = Path(raw.get('config', {}).get('rootDir') or project)
+    root = (root if root.is_absolute() else project / root).resolve()
+    check(root.is_relative_to(project.resolve()), 'code snapshot root outside project')
+    specs = set()
+    for spec, _ in json_tests(raw):
+        file = Path(spec['file'].replace('\\', '/'))
+        file = file if file.is_absolute() else root / file
+        check(file.is_relative_to(project.resolve()), 'code snapshot spec outside project')
+        value = file.relative_to(project.resolve()).as_posix()
+        code_path(project, value)
+        specs.add(value)
+    roots = {value for value in extra_roots}
+    roots.add((root / 'fixtures').relative_to(project.resolve()).as_posix())
+    # Include conventional fixture trees on each discovered spec's parent chain.
+    for value in specs:
+        parent = Path(value).parent
+        while parent != Path('.'):
+            roots.add((parent / 'fixtures').as_posix())
+            parent = parent.parent
+    return code_snapshot(project, specs, roots)
+
+
+def code_snapshot_difference(project, saved):
+    if not saved:
+        return {'status': 'incomplete', 'reason': 'code_fingerprint_missing'}
+    try:
+        current = code_snapshot(project, saved['specs'], saved['roots'])
+        previous = saved['files']
+        if current == saved:
+            return {'status': 'checked', 'reason': None}
+        return {'status': 'incomplete', 'reason': 'code_changed_after_full',
+                'added': sorted(set(current['files']) - set(previous)),
+                'removed': sorted(set(previous) - set(current['files'])),
+                'changed': sorted(p for p in previous.keys() & current['files'].keys()
+                                  if previous[p] != current['files'][p])}
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        return {'status': 'incomplete', 'reason': 'code_changed_after_full', 'error': str(error)}
+
+
 def inspect_attempt_plan(project, run_id, bundle, raw, track, blob_metadata):
     """The same checks run for helpers, direct collection and later report revalidation."""
     relative = f"test/.cache/runs/{run_id}/attempts/{bundle['bundle_id']}/plan.json"
@@ -268,10 +352,12 @@ def inspect_attempt_plan(project, run_id, bundle, raw, track, blob_metadata):
         check(expected['business'], 'full regression requires a nonempty business-test inventory')
         actual = runner_inventory(project, raw, plan['setup_projects'])
         result.update(discovery=discovery, expected=expected, actual=actual)
+        if 'code_snapshot' in plan:
+            result['code_snapshot'] = plan['code_snapshot']
     return result
 
 
-def regression_completeness(bundles, required_scopes=None, *, required=False):
+def regression_completeness(bundles, required_scopes=None, *, required=False, project=None):
     """Full means the selected CLI/shards targeted the discovered multiset, not that they passed."""
     groups, planned = {}, False
     for bid, bundle in bundles.items():
@@ -284,9 +370,10 @@ def regression_completeness(bundles, required_scopes=None, *, required=False):
         discovery = item['discovery']
         key = (discovery['sha256'], tuple(sorted(item['scope'])),
                discovery['config_fingerprint'], discovery['asset_fingerprint'],
-               discovery['freshness_marker'], (item.get('shard') or {}).get('total', 1))
+               discovery['freshness_marker'], (item.get('shard') or {}).get('total', 1),
+               (item.get('code_snapshot') or {}).get('sha256'))
         groups.setdefault(key, []).append((bid, bundle))
-    checks = []
+    checks, code_checks = [], {}
     for entries in groups.values():
         latest = {}
         for bid, bundle in sorted(entries, key=lambda v: (timestamp(v[1]['started_at']), v[0])):
@@ -306,8 +393,16 @@ def regression_completeness(bundles, required_scopes=None, *, required=False):
                 setup_errors.append(dict(bundle_id=bid, **difference))
         difference = target_difference(expected, actual)
         missing_shards = sorted(set(range(1, total+1))-set(latest))
+        snapshot = item.get('code_snapshot')
+        key = json.dumps(snapshot, sort_keys=True)
+        if key not in code_checks:
+            code_checks[key] = (code_snapshot_difference(project, snapshot) if project is not None
+                                else {'status': 'incomplete', 'reason': 'project_not_supplied'})
+        code_check = code_checks[key]
         checks.append({'complete': not (difference['missing'] or difference['unexpected']
-                                        or setup_errors or missing_shards),
+                                        or setup_errors or missing_shards
+                                        or code_check['status'] == 'incomplete'),
+                       'code_check': code_check,
                        'scope': item['scope'], 'bundle_ids': [v[0] for v in latest.values()],
                        'missing_shards': missing_shards, 'setup_differences': setup_errors, **difference})
     scopes = (set(required_scopes) if required_scopes is not None else
@@ -316,7 +411,8 @@ def regression_completeness(bundles, required_scopes=None, *, required=False):
     completed = {s for c in checks if c['complete'] for s in c['scope']}
     return {'status': ('complete' if checks and scopes <= completed else 'incomplete') if planned or required else 'not_declared',
             'missing_scopes': sorted(scopes-completed), 'groups': checks,
-            'note': 'Target-set completeness only; skips, failures and caller discovery provenance remain separate.'}
+            'note': 'Target multiset and current spec/fixture content are required for complete; '
+                    'skips, failures and caller discovery provenance remain separate.'}
 
 
 def verify_merge_command(command):
@@ -333,6 +429,44 @@ def verify_merge_command(command):
     check(any(not arg.startswith('-') and arg not in {'merge-reports', 'html'}
               for arg in normalized[normalized.index('merge-reports') + 1:]),
           'merge command must identify its blob input directory')
+
+
+def inspect_interrupted_attempt(project, run_id, attempt):
+    """Validate receipt-only provenance without inventing runner results."""
+    bid = attempt.get('bundle_id')
+    check(isinstance(bid, str) and re.fullmatch(r'[A-Za-z0-9_-]+', bid), 'invalid interrupted bundle ID')
+    check(attempt.get('run_id') == run_id and attempt.get('status') == 'interrupted',
+          'interrupted attempt identity/status mismatch')
+    check(isinstance(attempt.get('reason'), str) and attempt['reason'].strip(), 'interruption reason required')
+    prefix = f'test/.cache/runs/{run_id}/attempts/{bid}'
+    check(attempt.get('attempt_plan') == prefix + '/plan.json', 'interrupted plan outside attempt')
+    receipt_value = attempt.get('command_receipt')
+    check(isinstance(receipt_value, str) and Path(receipt_value).is_relative_to(Path(prefix)),
+          'command receipt outside interrupted attempt')
+    files = {}
+    for key in ('attempt_plan', 'command_receipt'):
+        path = path_in(project, attempt[key])
+        check(path.is_relative_to((project / prefix).resolve()), 'interrupted evidence resolves outside attempt')
+        check(hashlib.sha256(path.read_bytes()).hexdigest() == attempt.get(key + '_sha256'),
+              key + ' changed or has no registered digest')
+        files[key] = json.loads(path.read_text(encoding='utf-8'))
+    plan, receipt = files['attempt_plan'], files['command_receipt']
+    check(plan['run_id'] == run_id and plan['bundle_id'] == bid, 'interrupted plan identity mismatch')
+    for key in ('cwd', 'environment', 'scope', 'setup_projects', 'command', 'started_at', 'ended_at', 'exit_code'):
+        check(attempt.get(key) == receipt.get(key), 'interrupted receipt mismatch: ' + key)
+        if key in ('cwd', 'environment', 'scope', 'setup_projects'):
+            check(attempt[key] == plan[key], 'interrupted receipt differs from plan: ' + key)
+    check(type(receipt.get('exit_code')) is int and receipt['exit_code'] != 0,
+          'interrupted receipt requires an actual nonzero integer exit code')
+    check(timestamp(plan['planned_at']) <= timestamp(receipt['started_at']) <= timestamp(receipt['ended_at']),
+          'invalid interrupted invocation times')
+    check_attempt_command(plan, receipt['command'], project / prefix)
+    directory = project / prefix
+    check(not ((directory / 'results/result.json').is_file()
+               and (directory / 'report/playwright/index.html').is_file()
+               and len(list((directory / 'blob').glob('*.zip'))) == 1),
+          'complete artifacts require normal attempt-bundle/collect-results')
+    return attempt
 
 
 def inspect_bundle(project, run_id, bundle, *, require_plan=False):
@@ -590,7 +724,17 @@ def review_html(project, state, consistency):
         primary = '尚无原生合并报告；下表是依据原始JSON生成的汇总索引，不代替原生HTML'
     warnings.extend(escape(e) for e in consistency.get('errors', []))
     completeness = regression_completeness(
-        state.get('report_bundles', {}), state['scopes'], required=state.get('native_merge_required', False))
+        state.get('report_bundles', {}), state['scopes'], required=state.get('native_merge_required', False),
+        project=project)
+    interrupted = []
+    for bid, attempt in state.get('interrupted_attempts', {}).items():
+        try:
+            receipt = link(attempt['command_receipt'], '命令回执')
+        except (ValueError, OSError):
+            receipt = '命令回执缺失'
+        interrupted.append('<li>' + escape(bid) + ' · ' + escape(attempt['reason']) + ' · '
+                           + escape(attempt['started_at']) + ' → ' + escape(attempt['ended_at'])
+                           + ' · exit=' + escape(attempt['exit_code']) + ' · ' + receipt + '</li>')
     return '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>E2E review</title><style>
@@ -607,7 +751,8 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:700px}.scroll{overflow
 </pre></details><ul>''' + ''.join('<li>' + w + '</li>' for w in warnings) + '''
 </ul><div class="scroll"><table><thead><tr><th>执行批次</th><th>用例</th><th>Project</th><th>文件</th>
 <th>Retry</th><th>原始结果</th><th>Runner结论</th><th>证据</th></tr></thead><tbody>''' + ''.join(row for _, _, row in sorted(rows)) + '''
-</tbody></table></div><h2>各次执行的原始报告</h2><ul>''' + ''.join(invocation_links) + '</ul></main></html>'
+</tbody></table></div><h2>中断调用（仅回执，不计测试结果或全量完整性）</h2><ul>''' + ''.join(interrupted) + '''
+</ul><h2>各次执行的原始报告</h2><ul>''' + ''.join(invocation_links) + '</ul></main></html>'
 
 
 def check_execution(project, bundle, event, expected_title=None):

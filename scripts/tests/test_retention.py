@@ -120,6 +120,28 @@ class RetentionTest(unittest.TestCase):
             self.assertTrue(item['recycled_at'])
             self.assertEqual(['a'], item['original']['scopes'])
 
+    def test_batch_recycling_validates_journals_once_and_has_no_cross_call_cache(self):
+        r.apply_plan(self.project, self.plan())
+        paths = [self.raw_path, self.html, self.trace, self.noise]
+        absolute = str(self.project / self.html)
+        with mock.patch.object(r, 'manifests', wraps=r.manifests) as scans:
+            result = r.recycled_paths(self.project, paths * 20 + [absolute, '../unsafe', '/tmp/outside'])
+        self.assertEqual(set(paths + [absolute]), result)
+        self.assertEqual(1, scans.call_count)
+        self.write(self.html, 'recreated')
+        self.assertEqual(set(paths) - {self.html}, r.recycled_paths(self.project, paths))
+        self.assertFalse(r.is_recycled(self.project, absolute))
+
+    def test_batch_recycling_rejects_damaged_journals_and_symlinks(self):
+        applied = r.apply_plan(self.project, self.plan())
+        platform_tests.symlink(self, self.project / self.html, self.project / (self.prefix + '/state.json'))
+        self.assertEqual(set(), r.recycled_paths(self.project, [self.html]))
+        (self.project / self.html).unlink()
+        manifest = json.loads((self.project / applied['manifest']).read_text(encoding='utf-8'))
+        manifest['project'] = '/different-project'
+        self.write(applied['manifest'], manifest)
+        self.assertEqual(set(), r.recycled_paths(self.project, [self.html, self.raw_path]))
+
     def test_apply_is_idempotent_and_replan_understands_manifest(self):
         plan = self.plan()
         first = r.apply_plan(self.project, plan)

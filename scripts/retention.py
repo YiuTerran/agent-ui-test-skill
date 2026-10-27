@@ -672,6 +672,10 @@ def selection(tree, scopes, current_run=None, previously=None):
         else:
             # Preserve the diagnostic but do not let stale issue strings pin a terminal run.
             list(references(state, tree.path, limitations, protect=False))
+        for bid, attempt in state.get('interrupted_attempts', {}).items():
+            add_refs({key: attempt.get(key) for key in ('attempt_plan', 'command_receipt')},
+                     prefix + '/state.json', '/interrupted_attempts/' + bid,
+                     'interrupted_command_receipt', strict=True)
         protected_records = protected_state_records(state)
         # Effective decisions and resource recovery remain authoritative even
         # after completion; ordinary old failures are not in this protection set.
@@ -1280,26 +1284,42 @@ def apply_plan(project, plan):
                     limitations=plan.get('limitations', []))
 
 
-def is_recycled(project, path):
-    """True only for a journal-confirmed original path that is currently missing.
+def recycled_paths(project, paths):
+    """Return queried paths confirmed missing by one fresh journal validation.
 
     Pure read API: no lock acquisition/writes, so workflow may call while holding
     workflow.lock. Unsafe paths, symlinks, damaged journals and recreated files
-    return False. Absolute paths must be lexically inside the canonical project.
+    are excluded. Absolute paths must be lexically inside the canonical project.
+    The result is local to this call, never a process-wide retention cache.
     """
     tree = None
     try:
         tree = Tree(project)
-        value = os.fspath(path)
-        if os.path.isabs(value):
-            value = Path(value).relative_to(Path(tree.path)).as_posix()
-        deletable(value)
-        return value in recycled_records(tree)
+        queries = {}
+        for path in paths:
+            try:
+                original = os.fspath(path)
+                value = original
+                if os.path.isabs(value):
+                    value = Path(value).relative_to(Path(tree.path)).as_posix()
+                deletable(value)
+                queries[original] = value
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+        if not queries:
+            return set()
+        records = recycled_records(tree)
+        return {original for original, value in queries.items() if value in records}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return False
+        return set()
     finally:
         if tree:
             tree.close()
+
+
+def is_recycled(project, path):
+    """Single-path compatibility wrapper around the batch read API."""
+    return bool(recycled_paths(project, [path]))
 
 
 def recycled_bundle(project, run_id, bundle_id):

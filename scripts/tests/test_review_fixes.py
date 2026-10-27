@@ -80,7 +80,7 @@ class ReviewFixesTest(TestCase):
                             '--input', str(self.project / result['input']))
 
     def completeness(self):
-        return wf.report_artifacts.regression_completeness(self.state().get('report_bundles', {}), self.state()['scopes'])
+        return wf.report_artifacts.regression_completeness(self.state().get('report_bundles', {}), self.state()['scopes'], project=self.project)
 
     def test_legacy_shared_target_has_its_own_bucket_and_no_false_missing(self):
         cov = wf.load(self.project / 'test/plans/coverage.json')
@@ -183,19 +183,19 @@ class ReviewFixesTest(TestCase):
         bundles = copy.deepcopy(self.state()['report_bundles'])
         bundles['E1']['regression_check']['actual']['business'].append(
             {'file':'test/src/C1.spec.ts','title':'Synthetic extra','project':'chromium'})
-        result = wf.report_artifacts.regression_completeness(bundles, ['a','b'])
+        result = wf.report_artifacts.regression_completeness(bundles, ['a','b'], project=self.project)
         self.assertEqual('incomplete', result['status'])
         self.assertTrue(result['groups'][0]['unexpected'])
         bundles=copy.deepcopy(self.state()['report_bundles'])
         evidence=bundles['E1']['regression_check']
         evidence['actual']['business'].append(evidence['actual']['business'][0])
-        self.assertEqual('incomplete',wf.report_artifacts.regression_completeness(bundles)['status'])
+        self.assertEqual('incomplete',wf.report_artifacts.regression_completeness(bundles, project=self.project)['status'])
         evidence['actual']['business'].pop()
         evidence['expected']['setup']=[{'file':'test/src/auth.setup.ts','title':'Auth','project':'auth'}]
-        incomplete=wf.report_artifacts.regression_completeness(bundles)
+        incomplete=wf.report_artifacts.regression_completeness(bundles, project=self.project)
         self.assertTrue(incomplete['groups'][0]['setup_differences'])
         evidence['actual']['setup']=copy.deepcopy(evidence['expected']['setup'])
-        self.assertEqual('complete',wf.report_artifacts.regression_completeness(bundles)['status'])
+        self.assertEqual('complete',wf.report_artifacts.regression_completeness(bundles, project=self.project)['status'])
 
     def test_omitting_plan_binding_cannot_bypass_direct_collect(self):
         self.start()
