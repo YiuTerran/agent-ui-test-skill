@@ -132,9 +132,11 @@ with p.file_lock(f.fileno()): os._exit(0)
         files.api = types.SimpleNamespace(SetFileInformationByHandle=rename)
         with mock.patch.object(files, 'native', return_value='C:\\cache\\结果.json'):
             files.rename(123, 'unused')
+            files.rename(123, 'unused', replace=True)
         kind, flags, root, length, path = calls[0]
         self.assertEqual((3, 0, None), (kind, flags, root))
         self.assertEqual(len(path.encode('utf-16-le')), length)
+        self.assertEqual(1, calls[1][1])
 
     def test_win32_pins_deny_write_and_delete_sharing_except_lock_files(self):
         files = object.__new__(p.WindowsFiles)
@@ -227,6 +229,23 @@ class NativeWindowsTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.files.rename(handle, target)
         self.assertEqual(b'keep', target.read_bytes())
+
+    def test_retention_atomic_writes_work_with_pinned_parents(self):
+        spec = importlib.util.spec_from_file_location('native_retention', MODULE.with_name('retention.py'))
+        retention = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(retention)
+        tree = retention.WindowsTree(self.root)
+        try:
+            relative = 'test/.cache/retention/plans/synthetic.json'
+            tree.write(relative, {'version': 1}, exclusive=True)
+            self.assertEqual({'version': 1}, json.loads(tree.read(relative)[0]))
+            with self.assertRaises(OSError):
+                tree.write(relative, {'version': 2}, exclusive=True)
+            self.assertEqual({'version': 1}, json.loads(tree.read(relative)[0]))
+            tree.write(relative, {'version': 3})
+            self.assertEqual({'version': 3}, json.loads(tree.read(relative)[0]))
+        finally:
+            tree.close()
 
     def test_native_validated_file_cannot_be_written_until_handle_closes(self):
         source = self.root / 'protected'

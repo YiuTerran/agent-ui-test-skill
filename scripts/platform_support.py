@@ -210,13 +210,13 @@ class WindowsFiles:
                     return b''.join(chunks)
                 chunks.append(data)
 
-    def rename(self, handle, destination):
+    def rename(self, handle, destination, replace=False):
         encoded = self.native(destination).encode('utf-16-le')
         # The Win32 DOS-to-NT conversion reads a NUL-terminated name despite length.
         size = RenameInfo.name.offset + len(encoded) + 2
         buffer = ctypes.create_string_buffer(max(size, ctypes.sizeof(RenameInfo)))
         info = RenameInfo.from_buffer(buffer)
-        info.flags, info.root, info.length = 0, None, len(encoded)
+        info.flags, info.root, info.length = int(replace), None, len(encoded)
         ctypes.memmove(ctypes.addressof(buffer) + RenameInfo.name.offset, encoded, len(encoded))
         if not self.api.SetFileInformationByHandle(handle, 3, buffer, size):
             raise ctypes.WinError(ctypes.get_last_error())

@@ -293,13 +293,11 @@ class WindowsTree:
                     stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
-                if exclusive:
-                    # Windows rename is exclusive; unlike POSIX it never overwrites.
-                    os.rename(temporary, target)
-                else:
-                    if self.exists(value):
-                        self.read(value)
-                    os.replace(temporary, target)
+                if not exclusive and self.exists(value):
+                    self.read(value)
+                # MoveFileEx opens pinned parents incompatibly; mutate by file handle.
+                with self.files.handle(temporary, access=self.files.READ | self.files.DELETE) as handle:
+                    self.files.rename(handle, target, replace=not exclusive)
             finally:
                 temporary.unlink(missing_ok=True)
 
