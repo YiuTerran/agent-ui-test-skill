@@ -154,15 +154,169 @@ def verify_blob(path):
     try:
         with zipfile.ZipFile(path) as archive:
             check('report.jsonl' in archive.namelist(), 'blob report lacks report.jsonl')
-            lines = [line for line in archive.read('report.jsonl').splitlines() if line.strip()]
-            check(lines, 'blob report is empty')
-            metadata = json.loads(lines[0])
+            with archive.open('report.jsonl') as stream:
+                first = next((line for line in stream if line.strip()), None)
+            check(first is not None, 'blob report is empty')
+            metadata = json.loads(first)
             check(metadata.get('method') == 'onBlobReportMetadata'
                   and metadata.get('params', {}).get('userAgent', '').startswith('Playwright/')
                   and isinstance(metadata.get('params', {}).get('version'), int),
                   'blob report lacks Playwright metadata')
+            return metadata['params']
     except (zipfile.BadZipFile, KeyError, ValueError, UnicodeError) as error:
         raise ValueError('invalid Playwright blob report') from error
+
+
+def command_shard(command):
+    values = []
+    for index, arg in enumerate(command):
+        if arg == '--shard':
+            check(index + 1 < len(command), '--shard requires current/total')
+            values.append(command[index + 1])
+        elif arg.startswith('--shard='):
+            values.append(arg.split('=', 1)[1])
+    check(len(values) <= 1, 'command must specify at most one shard')
+    if not values:
+        return None
+    match = re.fullmatch(r'([1-9]\d*)/([1-9]\d*)', values[0])
+    check(match is not None, 'invalid --shard current/total')
+    current, total = map(int, match.groups())
+    check(current <= total, 'shard current exceeds total')
+    return {'current': current, 'total': total}
+
+
+def check_attempt_command(plan, command, directory):
+    planned = plan['command']
+    check(command[:len(planned)] == planned, 'actual command does not match planned command prefix')
+    suffix, seen = command[len(planned):], set()
+    permitted = {'--reporter=list,json,html,blob': [],
+                 '--output': [str(directory / 'results/output')]}
+    while suffix:
+        option = suffix[0]
+        check(option in permitted and option not in seen,
+              'unplanned command argument; put execution selectors in plan.command')
+        expected = [option, *permitted[option]]
+        check(suffix[:len(expected)] == expected, 'reporter/output arguments differ from attempt paths')
+        seen.add(option)
+        suffix = suffix[len(expected):]
+    check(command_shard(command) == plan.get('shard'), 'actual shard differs from plan')
+
+
+def runner_inventory(project, raw, setup_projects):
+    """Use complete identities and multiplicity; retries are results of the same target."""
+    root = Path(raw.get('config', {}).get('rootDir') or project)
+    root = (root if root.is_absolute() else project / root).resolve()
+    check(root.is_relative_to(project.resolve()), 'runner root outside project')
+    values = {'business': [], 'setup': []}
+    for spec, test in json_tests(raw):
+        file = Path(spec['file'].replace('\\', '/'))
+        file = (file if file.is_absolute() else root / file).resolve()
+        check(file.is_relative_to(project.resolve()), 'runner spec outside project')
+        kind = 'setup' if test.get('projectName') in setup_projects else 'business'
+        values[kind].append({'file': file.relative_to(project).as_posix(),
+                             'title': spec['title'], 'project': test.get('projectName', '')})
+    return values
+
+
+def target_counter(rows):
+    return Counter((r['file'], r['title'], r['project']) for r in rows)
+
+
+def target_difference(expected, actual):
+    def rows(counter):
+        return [dict(zip(('file', 'title', 'project'), key), count=count)
+                for key, count in sorted(counter.items())]
+    return {'missing': rows(expected-actual), 'unexpected': rows(actual-expected)}
+
+
+def inspect_attempt_plan(project, run_id, bundle, raw, track, blob_metadata):
+    """The same checks run for helpers, direct collection and later report revalidation."""
+    relative = f"test/.cache/runs/{run_id}/attempts/{bundle['bundle_id']}/plan.json"
+    check(bundle['attempt_plan'] == relative, 'attempt plan outside invocation directory')
+    path = track(relative)
+    check(hashlib.sha256(path.read_bytes()).hexdigest() == bundle.get('attempt_plan_sha256'),
+          'attempt plan changed after bundle preparation')
+    plan = json.loads(path.read_text(encoding='utf-8'))
+    check(plan['run_id'] == run_id and plan['bundle_id'] == bundle['bundle_id'], 'attempt plan identity mismatch')
+    for key in ('scope', 'setup_projects', 'environment', 'cwd'):
+        check(plan[key] == bundle[key], 'bundle differs from attempt plan: ' + key)
+    check_attempt_command(plan, bundle['command'], path.parent)
+    check(timestamp(plan['planned_at']) <= timestamp(bundle['started_at']), 'invocation precedes attempt preparation')
+    check(plan.get('regression_mode') in {'affected', 'full'}, 'attempt must declare regression_mode')
+    blobs = bundle.get('blob_reports', [])
+    # One CLI produces one blob, including a CLI for one explicitly planned shard.
+    for value in blobs:
+        metadata = blob_metadata[value]
+        check(metadata.get('shard') == plan.get('shard'), 'blob shard differs from attempt plan')
+    check(len(blobs) == 1, 'one CLI/attempt requires exactly one native blob; use one attempt per shard')
+    if raw.get('config', {}).get('shard') is not None or plan.get('shard') is not None:
+        check(raw.get('config', {}).get('shard') == plan.get('shard'), 'runner JSON shard differs from plan')
+    result = {'mode': plan['regression_mode'], 'scope': plan['scope'], 'shard': plan.get('shard'),
+              'freshness_marker': plan['freshness_marker'],
+              'config_fingerprint': plan['config_fingerprint'], 'asset_fingerprint': plan['asset_fingerprint']}
+    if plan['regression_mode'] == 'full':
+        discovery = plan['discovery']
+        discovery_path = path_in(project, discovery['path'])
+        check(hashlib.sha256(discovery_path.read_bytes()).hexdigest() == discovery['sha256'],
+              'full-regression discovery artifact changed')
+        check(set(plan['scope']) == set(discovery['scopes'])
+              and plan['setup_projects'] == discovery['setup_projects'], 'full-regression discovery scope/setup mismatch')
+        expected = runner_inventory(project, json.loads(discovery_path.read_text(encoding='utf-8')),
+                                    plan['setup_projects'])
+        check(not discovery.get('reviewed_missing_tests'),
+              'full regression discovery omits reviewed independent tests')
+        check(expected['business'], 'full regression requires a nonempty business-test inventory')
+        actual = runner_inventory(project, raw, plan['setup_projects'])
+        result.update(discovery=discovery, expected=expected, actual=actual)
+    return result
+
+
+def regression_completeness(bundles, required_scopes=None, *, required=False):
+    """Full means the selected CLI/shards targeted the discovered multiset, not that they passed."""
+    groups, planned = {}, False
+    for bid, bundle in bundles.items():
+        item = bundle.get('regression_check')
+        if item is None:
+            continue
+        planned = True
+        if item['mode'] != 'full':
+            continue
+        discovery = item['discovery']
+        key = (discovery['sha256'], tuple(sorted(item['scope'])),
+               discovery['config_fingerprint'], discovery['asset_fingerprint'],
+               discovery['freshness_marker'], (item.get('shard') or {}).get('total', 1))
+        groups.setdefault(key, []).append((bid, bundle))
+    checks = []
+    for entries in groups.values():
+        latest = {}
+        for bid, bundle in sorted(entries, key=lambda v: (timestamp(v[1]['started_at']), v[0])):
+            item = bundle['regression_check']
+            current = (item.get('shard') or {}).get('current', 1)
+            latest[current] = (bid, item)
+        item = next(iter(latest.values()))[1]
+        total = (item.get('shard') or {}).get('total', 1)
+        expected = target_counter(item['expected']['business'])
+        actual = Counter()
+        setup_errors = []
+        for bid, value in latest.values():
+            actual.update(target_counter(value['actual']['business']))
+            difference = target_difference(target_counter(value['expected']['setup']),
+                                           target_counter(value['actual']['setup']))
+            if difference['missing'] or difference['unexpected']:
+                setup_errors.append(dict(bundle_id=bid, **difference))
+        difference = target_difference(expected, actual)
+        missing_shards = sorted(set(range(1, total+1))-set(latest))
+        checks.append({'complete': not (difference['missing'] or difference['unexpected']
+                                        or setup_errors or missing_shards),
+                       'scope': item['scope'], 'bundle_ids': [v[0] for v in latest.values()],
+                       'missing_shards': missing_shards, 'setup_differences': setup_errors, **difference})
+    scopes = (set(required_scopes) if required_scopes is not None else
+              {s for b in bundles.values() if b.get('regression_check')
+               for s in b['regression_check']['scope']})
+    completed = {s for c in checks if c['complete'] for s in c['scope']}
+    return {'status': ('complete' if checks and scopes <= completed else 'incomplete') if planned or required else 'not_declared',
+            'missing_scopes': sorted(scopes-completed), 'groups': checks,
+            'note': 'Target-set completeness only; skips, failures and caller discovery provenance remain separate.'}
 
 
 def verify_merge_command(command):
@@ -181,13 +335,20 @@ def verify_merge_command(command):
           'merge command must identify its blob input directory')
 
 
-def inspect_bundle(project, run_id, bundle):
+def inspect_bundle(project, run_id, bundle, *, require_plan=False):
     """Bind immutable artifacts to an invocation and compare raw runner results."""
     bid = bundle.get('bundle_id')
     check(isinstance(bid, str) and re.fullmatch(r'[A-Za-z0-9_-]+', bid), 'invalid report bundle ID')
     check(bundle.get('run_id') == run_id, 'report run ID mismatch')
     prefix = (project / 'test/.cache/runs' / run_id / 'attempts' / bid).resolve()
     check(prefix.is_relative_to(project.resolve()), 'report run path escapes project')
+    check(not require_plan or bundle.get('attempt_plan'), 'native invocation requires its attempt plan binding')
+    if (prefix / 'plan.json').is_file():
+        local_plan = json.loads((prefix / 'plan.json').read_text(encoding='utf-8'))
+        check(not require_plan or local_plan.get('schema_version', 1) >= 2,
+              'native invocation requires a current-schema attempt plan')
+        if local_plan.get('schema_version', 1) >= 2:
+            check(bundle.get('attempt_plan'), 'prepared attempt requires its plan binding')
     for field in ['command', 'cwd', 'environment', 'scope', 'setup_projects']:
         check(field in bundle and bundle[field] is not None, 'report requires ' + field)
     check(bundle['command'] and isinstance(bundle['setup_projects'], list), 'invalid command or setup projects')
@@ -205,11 +366,12 @@ def inspect_bundle(project, run_id, bundle):
     raw_path = track(bundle['execution_result'])
     blobs = bundle.get('blob_reports', [])
     check(isinstance(blobs, list) and len(blobs) == len(set(blobs)), 'blob_reports must be unique paths')
+    blob_metadata = {}
     for value in blobs:
         check(isinstance(value, str) and value.endswith('.zip'), 'blob report must be a ZIP path')
         blob = track(value)
         check(zipfile.is_zipfile(blob), 'invalid blob ZIP')
-        verify_blob(blob)
+        blob_metadata[value] = verify_blob(blob)
     raw = json.loads(raw_path.read_text(encoding='utf-8'))
     stats = raw['stats']
     raw_start = timestamp(stats['startTime'])
@@ -262,7 +424,9 @@ def inspect_bundle(project, run_id, bundle):
                         track(value)
     setup_tests = [test for _, test in pairs if test.get('projectName') in setups]
     business = [test for _, test in pairs if test.get('projectName') not in setups]
-    return dict(bundle, report_consistency='passed' if html else 'json_only',
+    regression = inspect_attempt_plan(project, run_id, bundle, raw, track, blob_metadata) if bundle.get('attempt_plan') else None
+    return dict(bundle, **({'regression_check': regression} if regression is not None else {}),
+                report_consistency='passed' if html else 'json_only',
                 artifact_sha256=tracked,
                 runner_counts={key: stats.get(key, 0) for key in ['expected', 'unexpected', 'flaky', 'skipped']},
                 setup_targets=len(setup_tests), business_targets=len(business),
@@ -271,9 +435,11 @@ def inspect_bundle(project, run_id, bundle):
                 raw_business_skipped=sum(t['status'] == 'skipped' for t in business))
 
 
-def recheck_bundle(project, run_id, saved):
-    current = inspect_bundle(project, run_id, saved)
+def recheck_bundle(project, run_id, saved, *, require_plan=False):
+    current = inspect_bundle(project, run_id, saved, require_plan=require_plan)
     check(current['artifact_sha256'] == saved['artifact_sha256'], 'report artifacts changed after registration')
+    if saved.get('attempt_plan'):
+        check(current['regression_check'] == saved.get('regression_check'), 'regression target evidence changed')
     return current
 
 
@@ -423,6 +589,8 @@ def review_html(project, state, consistency):
     else:
         primary = '尚无原生合并报告；下表是依据原始JSON生成的汇总索引，不代替原生HTML'
     warnings.extend(escape(e) for e in consistency.get('errors', []))
+    completeness = regression_completeness(
+        state.get('report_bundles', {}), state['scopes'], required=state.get('native_merge_required', False))
     return '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>E2E review</title><style>
@@ -433,7 +601,10 @@ tr[data-priority="0"]{background:#fff0ec}tr[data-priority="1"],tr[data-priority=
 pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:700px}.scroll{overflow:auto}
 </style><main><h1>本轮测试报告 · ''' + escape(state['run_id']) + '''</h1><p>''' + primary + '''</p>
 <p>顺序：失败 → 非预期/重跑后通过 → 跳过/未执行 → 通过。Setup与每次原始尝试均保留，不代表唯一用例数。</p>
-<p>报告一致性：''' + escape(consistency['status']) + '</p><ul>' + ''.join('<li>' + w + '</li>' for w in warnings) + '''
+<p>报告一致性：''' + escape(consistency['status']) + '</p><p>收尾全量目标集合：' + escape(completeness['status']) + '''
+（与执行者声明完整的发现清单比较，独立于通过/失败）</p>
+<details><summary>全量目标、Setup及分片差集</summary><pre>''' + escape(json.dumps(completeness, ensure_ascii=False, indent=2)) + '''
+</pre></details><ul>''' + ''.join('<li>' + w + '</li>' for w in warnings) + '''
 </ul><div class="scroll"><table><thead><tr><th>执行批次</th><th>用例</th><th>Project</th><th>文件</th>
 <th>Retry</th><th>原始结果</th><th>Runner结论</th><th>证据</th></tr></thead><tbody>''' + ''.join(row for _, _, row in sorted(rows)) + '''
 </tbody></table></div><h2>各次执行的原始报告</h2><ul>''' + ''.join(invocation_links) + '</ul></main></html>'

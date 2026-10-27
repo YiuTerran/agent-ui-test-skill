@@ -12,6 +12,11 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 | --- | --- |
 | `init` | 原子补齐`test/spec.md`、`test/plans/coverage.json`，已有文件字节不变；返回created/preserved、缺项及发现的配置/脚本名称，不回显脚本正文，不推测授权 |
 | `doctor` | 只读检查项目资产、配置/映射和`test/.cache/`的Git忽略规则；不补文件、不修改`.gitignore`或启动run |
+| `preflight --owner NAME [--run RUN] [--input FILE]` | 本地诊断及一次start/renew，汇总已提供的真实来源观察、完整发现JSON与覆盖差集；不访问远端或执行测试，未提供输入保持unknown |
+| `validate-input --run RUN --owner NAME --type TYPE --input FILE` | 无副作用重放record或collect-results门禁；TYPE=source/execution/record/report_bundle，不提交状态、coverage或创建锁 |
+| `attempt-init --run RUN --owner NAME --bundle ID --input FILE` | 按真实计划创建新attempt与输出参数；无执行时间/退出码，不执行CLI，拒绝覆盖 |
+| `attempt-bundle/attempt-check --run RUN --owner NAME --bundle ID [--input FILE]` | 核对真实command.json与JSON/HTML/blob；bundle排他生成事件供collect-results，check仅诊断，不登记执行 |
+| `timing --run RUN [--input FILE]` | 只读区间及宿主计数汇总，不修改历史；未知保留null，重叠时间不重复相加 |
 | `schema --type execution`或`schema --type report_bundle` | 从技能`assets/events.schema.json`输出实际输入形状，无需`--project`；不是输入验证器，不代替运行时来源/审批/证据门禁 |
 | `start --owner NAME [--scopes a,b]` | 获取/恢复唯一兼容未完成run；多个匹配时显式选择。NAME为主任务独有且稳定标识，scope只能取固定范围子集 |
 | `start --resume RUN [--reclaim --reason TEXT]` | 中断恢复；其他owner占用只有过期且显式reclaim才可接管，活跃租约拒绝。已release可接管，仍须恢复核对 |
@@ -28,6 +33,10 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 `record`/`collect-results`默认简报，`--brief`可显式指定；包含数量、相关ID及原因，后者还含`collection`的bundle_id、committed、complete、events_recorded、counts、unresolved。`complete=false`仍exit0，表示映射待核实，不代表通过。`--full`输出完整状态及regression_inventory；显式`status`仍默认完整。
 
 `--brief/--full`仅适用于status、record、collect-results；其他命令携带这些参数时直接exit2，不修改状态，不静默忽略。report/validate保持完整证据检查和输出。
+
+新增辅助入口的输入、输出及边界见[本地辅助入口](local-tools.md)。preflight的valid只表示本地预检完成，发现完整性由执行者声明；validate-input的valid不表示业务通过，bundle映射待核实仍须看collection.complete/unresolved。正常固定流程不额外调用validate-input/attempt-check。
+
+schema_version=2的Attempt计划记录regression_mode=affected/full、可选完整发现指纹及明确shard。新run每个bundle绑定attempt_plan路径及attempt_plan_sha256，登记、结果导入和报告重核同时校验计划命令、单次blob及输入身份。summary.regression_completeness独立表示目标多重集合和全部分片是否齐全；新run的fully_accepted要求complete，业务通过另行核验；缺少bundle或full时为incomplete，not_declared只保留给旧run的未声明兼容记录。字段和收尾差集见[Attempt契约](local-tools.md#attempt准备与事件生成)。
 
 简报含run_id/freshness_marker/claim/acceptance、counts（selected_cases/ready/blocked/work_needed/executions）、blocked_cases/regression_ready/work_needed/work_needed_reasons/next_steps、missing_configuration及configuration_drift/coverage_asset_drift。不扫描历史run：省略`global_residual_runs`并置`global_residuals_checked=false`，不把未检查当作零残留。完整status/report及最终验收继续做跨run残留核对和既有安全检查；简报只减少重复输出/扫描，不放宽提交、绑定或验收门禁。无需为每次简报追加完整查询，只有诊断或最终安全核对需要时才展开。
 
@@ -72,7 +81,7 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 
 活动需求与未退役case须双向映射且scope/source一致。退役case留在登记/报告中，可从活动需求移除；最后一个case退役须同时退役需求或提供替代映射。legacy组合只有逐case的steps.result及本地证据才能传播逐例结果，不计独立覆盖。
 
-每轮真实发现与需求/计划/coverage做完整差集，缺口处理、用户本轮跳过范围与报告口径见[工作流](workflow.md#覆盖缺口门禁与模块补全)。all_existing_automation只规定收尾执行集合，不省略缺口补全；status/validate不证明语义完整。
+每轮真实发现与需求/计划/coverage做完整差集，按模块汇总缺口后由用户选择新增范围，见[工作流](workflow.md#覆盖缺口门禁与模块补全)。all_existing_automation规定收尾执行集合；补写缺口以本轮用户选择为准。status/validate不证明语义完整。
 
 ## record事件
 
@@ -86,10 +95,11 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 | `source`增删量 | 同上 | requirement_delta={added,updated,retired}，均非负整数 | 仅baseline_available=true且有效旧baseline_path文件存在时可记；旧正文缺失不推测增删量。business_change=false也不自动升级baseline |
 | `recovery_review` | environment_checked=true、artifacts_checked=true | invalidate_case_ids、evidence可选 | 完成本次恢复核对；只失效指定case，不复用已失效pass |
 
-### task、case、baseline
+### automation_expansion、task、case、baseline
 
 | 事件 | 必填字段 | 条件/可选字段与值 | 门禁 |
 | --- | --- | --- | --- |
+| `automation_expansion` | owner、mode、scopes、gap_case_ids、user_reply、evidence | mode=`modules/all/skip`；scopes为用户选择新增的模块，all取本run全部scope，skip取[]；gap_case_ids为提交给用户的完整缺口清单，含未选模块和待建case的候选ID | 仅主Agent依据真实用户答复登记，evidence包含模块清单和答复；modules仅授权所选scope内列出的ID，all授权完整清单，skip保留缺口并回归已有。选择仅属当前run，新轮不继承 |
 | `task` | task_id、phase、status、owner | phase=`impact/clarify/case_review/exploration/code/execution/acceptance`；status=`pending/running/blocked/approved/complete`；case_ids、source_id、affected_case_ids/affected_requirement_ids、evidence可选 | 同task不能改phase；来源审批绑定当时观察版本。需求变化须完成impact/case_review；需要clarify时显式建任务。未完成旧任务恢复后仍阻塞关联case |
 | `task.dispositions` | 非自动化case_review时逐case提供mode、status=approved、acceptance_version、reason、evidence | mode=`manual/hardware/deferred` | case必须在task.case_ids中，mode和版本匹配登记case；有明确理由和已有证据 |
 | `case` | case_id、action | action=`added/updated/retired/unchanged/needs_decision`；exploration/code=`none/pending/running/complete/blocked`（缺省none）；exploration_action=`executed/reused/not_needed/blocked`（缺省not_needed）；code_action=`added/modified/reused/retired/missing`（缺省missing）；coverage、requirements、evidence可选 | 新case需完整coverage；带coverage/requirements或退役须本轮可读来源、变化影响/审批完成，无对应人工阻塞。两映射更新保持Git资产约束 |
@@ -97,6 +107,7 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 
 - impact完成时可精确列受影响case或需求；未列则按该来源本轮全部case失效，未受影响case可继续旧基线回归。
 - case保留最新状态和完整动作历史；本轮added后updated/unchanged仍只计一次added，updated后unchanged仍计一次updated。状态与报告动作分别登记。
+- 新增自动化case/code及缺口case的探索/代码推进须匹配automation_expansion的模块和case清单；缺口来自接管时的代码资格及preflight真实发现。脚本拒绝未获选范围的新增回执，已有合格测试的执行不依赖新增选择。仅登记候选/待决事项保持待补；实际文件编辑与浏览器启动前由执行者落实同一门禁。summary/status及Markdown保留选择和未选/待选择的缺口，完整需求验收继续检查真实覆盖。
 - 带coverage/requirements时先原子写coverage再写state，更新预期指纹；这是跨文件提交，不是数据库事务，中断后须恢复核对。
 
 ### resource、human、delegation
@@ -165,14 +176,15 @@ usage仅唯一根项明确coverage=complete_run且有coverage_description说明�
 | `merged_report` | report.html_report、bundle_ids、command、started_at、ended_at、exit_code | 主owner登记实际离线merge，exit_code=0；输入为所有bundle的blob_reports | bundle_ids恰好覆盖本轮全部CLI；比较原始JSON全部尝试与合并HTML/附件，保存输入ZIP及输出摘要；新增CLI须重新合并 |
 | `acceptance` | status、owner | status=`in_progress/blocked/partially_accepted/fully_accepted/completed_with_failures/partially_blocked/aborted`；reason、evidence可选 | owner必须主owner；终态为fully_accepted/completed_with_failures/partially_blocked/aborted；资源残留阻止fully_accepted |
 
-新run固定`native_merge_required=true`，每次CLI必须JSON+非空blob_reports，正常同时HTML；最终必须登记并核验覆盖全部CLI的原生合并。旧run缺标志按false兼容，缺blob/JSON-only只作历史限制，不能用于新run或冒称原生合并已完成。
+新run固定`native_merge_required=true`，每个bundle必须绑定当前schema的Attempt计划，每次CLI必须JSON+非空blob_reports，正常同时HTML；最终必须登记并核验覆盖全部CLI的原生合并。旧run缺标志按false兼容，缺blob/JSON-only只作历史限制，不能用于新run或冒称原生合并已完成。
 
 fully_accepted还必须同时满足：
 
 - 本轮来源均已检查且可读；配置/coverage有效，scope具备非空已审核需求清单，需求完整映射到case。
 - 无本run或其他历史run未核清资源，无未完任务、人工、失效或缺代码；完整检查不因简报省略。
 - 全部自动化case有当前版本有效逐例pass；manual/hardware/deferred均有带版本、理由和证据的批准dispositions，manual/hardware还须当前逐例pass。
-- 已有bundle时整轮绑定checked且新run原生合并核验通过；事件只记录主Agent判断，不证明业务语义全覆盖。产品失败可按completed_with_failures结束，不篡改历史结果。
+- 新run具有绑定完整发现清单的full回归，regression_completeness=complete且整轮绑定checked、原生合并核验通过；没有bundle或只有旧式直接execution时同样执行该门禁。旧run已有bundle时要求整轮绑定checked。
+- 事件只记录主Agent判断，不证明业务语义全覆盖。产品失败可按completed_with_failures结束，不篡改历史结果。
 
 ## 状态与统计
 

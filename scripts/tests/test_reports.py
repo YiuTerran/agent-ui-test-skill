@@ -396,6 +396,16 @@ class ReportTest(unittest.TestCase):
         self.collect(bundle, fail=True)
         self.assertEqual(before, self.state())
         self.add_blob(bundle)
+        self.collect(bundle, fail=True)
+        self.assertEqual(before, self.state())
+        plan_path = f'test/.cache/runs/{self.run}/attempts/E1/plan.json'
+        plan = {key: bundle[key] for key in ('command', 'cwd', 'environment', 'scope', 'setup_projects')}
+        plan.update(schema_version=2, run_id=self.run, bundle_id='E1', regression_mode='affected', shard=None,
+                    planned_at=bundle['started_at'], freshness_marker=state['freshness_marker'],
+                    config_fingerprint=state['config_fingerprint'], asset_fingerprint=state['asset_fingerprint'])
+        self.write(plan_path, plan)
+        bundle.update(attempt_plan=plan_path, attempt_plan_sha256=wf.hashlib.sha256(
+            (self.project / plan_path).read_bytes()).hexdigest())
         self.collect(bundle)
         result = self.cli('report', '--run', self.run, '--owner', self.owner, fail=True)
         self.assertIn('merged_report: native merge required before final report', result['report_consistency']['errors'])

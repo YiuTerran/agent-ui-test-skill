@@ -1,301 +1,296 @@
-"""Coverage diagnostics, batch cost and local doctor regression checks."""
-import contextlib
+"""Regressions for discovery, command selection, atomic publication and host formats."""
+import copy
+from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
-import subprocess
-import unittest
-from unittest import mock
+from unittest import TestCase, mock
+import zipfile
 
-import test_workflow as base
+import test_tools as base
 
 wf = base.wf
 
 
-class ReviewFixTest(unittest.TestCase):
-    setUp = base.WorkflowTest.setUp
-    tearDown = base.WorkflowTest.tearDown
-    write = base.WorkflowTest.write
-    cli = base.WorkflowTest.cli
-    start = base.WorkflowTest.start
-    record = base.WorkflowTest.record
-    check_sources = base.WorkflowTest.check_sources
-    execution = base.WorkflowTest.execution
-    state = base.WorkflowTest.state
+class ReviewFixesTest(TestCase):
+    setUp = base.ToolsTest.setUp
+    tearDown = base.ToolsTest.tearDown
+    write = base.ToolsTest.write
+    cli = base.ToolsTest.cli
+    start = base.ToolsTest.start
+    record = base.ToolsTest.record
+    check_sources = base.ToolsTest.check_sources
+    state = base.ToolsTest.state
+    inventory = base.ToolsTest.inventory
+    ignored = base.ToolsTest.ignored
+    init_attempt = base.ToolsTest.init_attempt
+    html = base.ToolsTest.html
+    snapshot = base.ToolsTest.snapshot
 
-    def test_duplicate_test_ids_are_invalid_with_concrete_work_reasons(self):
-        spec, cov = wf.assets(self.project)
-        cov['cases']['C2']['test_id'] = 'C1'
+    def preflight(self, raw=None):
+        self.write('discovery.json', raw or self.inventory())
+        self.write('preflight.json', {'discovery': {'path': 'discovery.json', 'complete': True,
+                                                    'setup_projects': ['auth']}})
+        with self.ignored():
+            return self.cli('preflight', '--run', self.run, '--owner', self.owner,
+                            '--input', str(self.project / 'preflight.json'))
+
+    def finish(self, bid='E1', fail=False):
+        with mock.patch.object(wf, 'now', return_value=self.later.isoformat()):
+            return self.cli('attempt-bundle', '--run', self.run, '--owner', self.owner,
+                            '--bundle', bid, fail=fail)
+
+    def blob(self, bid='E1', name='report.zip', shard=None, valid=True):
+        stream = io.BytesIO()
+        metadata = {'version': 2, 'userAgent': 'Playwright/1.64.1 synthetic'}
+        if shard:
+            metadata['shard'] = shard
+        with zipfile.ZipFile(stream, 'w') as archive:
+            archive.writestr('report.jsonl' if valid else 'unrelated.txt',
+                             json.dumps({'method': 'onBlobReportMetadata', 'params': metadata})+'\n')
+        self.write(f'test/.cache/runs/{self.run}/attempts/{bid}/blob/{name}', '')
+        (self.project / f'test/.cache/runs/{self.run}/attempts/{bid}/blob/{name}').write_bytes(stream.getvalue())
+
+    def evidence(self, bid='E1', targets=('C1',), shard=None, appended=None):
+        prefix = f'test/.cache/runs/{self.run}/attempts/{bid}'
+        plan = wf.load(self.project / prefix / 'plan.json')
+        start = datetime.now(timezone.utc)
+        self.later = start+timedelta(seconds=5)
+        raw = {'config': {'rootDir': str(self.project / 'test/src'), 'shard': shard},
+               'stats': {'startTime': start.isoformat(), 'duration': 2000,
+                         'expected': len(targets), 'unexpected': 0, 'skipped': 0, 'flaky': 0},
+               'errors': [], 'suites': [{'specs': [
+                   {'title': 'Synthetic '+cid, 'file': cid+'.spec.ts',
+                    'tests': [{'projectName': 'chromium', 'status': 'expected', 'results': [
+                        {'startTime': start.isoformat(), 'retry': 0, 'duration': 1000,
+                         'status': 'passed', 'attachments': []}]}]} for cid in targets]}]}
+        self.write(prefix+'/results/result.json', raw)
+        self.html({'html_report': prefix+'/report/playwright/index.html'}, raw)
+        self.blob(bid=bid, shard=shard)
+        receipt = {key: plan[key] for key in ('cwd', 'environment', 'scope', 'setup_projects')}
+        receipt.update(command=plan['command'] + (appended if appended is not None else
+                                                  ['--reporter=list,json,html,blob']),
+                       started_at=start.isoformat(), ended_at=(start+timedelta(seconds=3)).isoformat(), exit_code=0)
+        self.write(prefix+'/command.json', receipt)
+        return raw
+
+    def collect(self, result):
+        with mock.patch.object(wf, 'now', return_value=self.later.isoformat()):
+            return self.cli('collect-results', '--run', self.run, '--owner', self.owner,
+                            '--input', str(self.project / result['input']))
+
+    def completeness(self):
+        return wf.report_artifacts.regression_completeness(self.state().get('report_bundles', {}), self.state()['scopes'])
+
+    def test_legacy_shared_target_has_its_own_bucket_and_no_false_missing(self):
+        cov = wf.load(self.project / 'test/plans/coverage.json')
+        cov['cases']['C1']['legacy_group'] = True
+        cov['cases']['L1'] = copy.deepcopy(cov['cases']['C1'])
+        cov['requirements']['R1']['case_ids'].append('L1')
         self.write('test/plans/coverage.json', cov)
-        self.assertIn('duplicate test_id: C1/C2 (C1)', wf.asset_errors(self.project, spec, cov))
-        self.cli('validate', fail=True)
         self.start()
-        view = self.check_sources()
-        for cid in ['C1', 'C2']:
-            self.assertIn('duplicate_test_id:C1/C2', view['work_needed_reasons'][cid])
-            self.assertIn('duplicate_test_id:C1/C2', view['regression_inventory'][cid]['blocked_by'])
-        self.record(self.execution('bad'), fail=True)
-        cov['cases']['C2']['implementation'] = 'retired'
-        self.assertFalse(any('duplicate test_id' in e for e in wf.asset_errors(self.project, spec, cov)))
+        result = self.preflight()['coverage_diff']
+        self.assertEqual([], result['unmapped_tests'])
+        self.assertEqual([], result['missing_tests'])
+        self.assertEqual(['C1','L1'], result['legacy_shared_tests'][0]['case_ids'])
+        self.assertIn('legacy_group_requires_independent_test', result['code_review_gaps']['C1'])
+        self.assertEqual(['C2'], result['matched_cases'])
 
-    def test_work_needed_reasons_identify_each_repair(self):
-        spec, cov = wf.assets(self.project)
-        cov['cases']['C1'].update(review='pending', implementation='draft', acceptance_version='old')
-        cov['requirements']['R1']['review'] = 'pending'
-        (self.project / cov['cases']['C1']['plan']).unlink()
-        (self.project / cov['cases']['C1']['spec']).unlink()
-        self.write('test/plans/coverage.json', cov)
+    def test_preflight_does_not_reload_assets_in_discovery_diff(self):
         self.start()
-        view = self.check_sources()
-        self.assertEqual({'review_not_approved', 'implementation_not_valid',
-                          'acceptance_version_mismatch:R1', 'requirement_review_not_approved:R1',
-                          'missing_plan_file:test/plans/C1.md', 'missing_spec_file:test/src/C1.spec.ts'},
-                         set(view['work_needed_reasons']['C1']))
-        self.assertEqual(['C2'], view['regression_ready'])
+        with mock.patch.object(wf, 'assets', wraps=wf.assets) as reader:
+            self.preflight()
+        self.assertEqual(1, reader.call_count)
 
-    def test_legacy_cases_may_share_test_id_without_claiming_independent_coverage(self):
-        spec, cov = wf.assets(self.project)
-        for case in cov['cases'].values():
-            case.update(test_id='old-group', legacy_group=True)
-        self.write('test/plans/coverage.json', cov)
-        self.assertEqual([], wf.asset_errors(self.project, spec, cov))
-        self.cli('validate')
+    def test_unplanned_filters_spec_paths_and_option_overrides_are_rejected(self):
         self.start()
-        self.check_sources()
-        view = self.record([
-            {'type': 'case', 'case_id': cid, 'action': 'updated', 'coverage': case}
-            for cid, case in cov['cases'].items()])
-        for cid in cov['cases']:
-            self.assertFalse(wf.covered(self.project, cov, cid))
-            self.assertEqual(['legacy_group_requires_independent_test'], view['work_needed_reasons'][cid])
-        self.record(self.execution('old', test_id='old-group', case_ids=['C1', 'C2'], legacy_group=True,
-                                   steps={cid: {'result': 'pass', 'evidence': ['test/evidence.txt']}
-                                          for cid in cov['cases']}))
-        self.assertEqual({'C1': 'pass', 'C2': 'pass'}, wf.case_results(self.project, self.state(), cov))
+        self.init_attempt()
+        for appended in (['--grep', 'C1'], ['--project=chromium'], ['C1.spec.ts'], ['--no-deps'],
+                         ['--reporter=list,json,html,blob', '--grep=C1'],
+                         ['--output', '/some-other-output'], ['--shard=1/2']):
+            with self.subTest(appended=appended):
+                self.evidence(appended=appended)
+                self.assertIn('argument', self.finish(fail=True)['error'])
 
-    def test_legacy_exemption_does_not_hide_independent_duplicates(self):
-        spec, cov = wf.assets(self.project)
-        cov['cases']['C2'].update(test_id='C1', legacy_group=True)
-        self.assertEqual([], wf.asset_errors(self.project, spec, cov))
-        self.assertTrue(wf.covered(self.project, cov, 'C1'))
-        cov['cases']['C3'] = dict(cov['cases']['C1'])
-        cov['requirements']['R1']['case_ids'].append('C3')
-        self.assertIn('duplicate test_id: C1/C3 (C1)', wf.asset_errors(self.project, spec, cov))
-        self.assertIn('duplicate_test_id:C1/C3', wf.coverage_reasons(self.project, cov, 'C1'))
+    def test_only_exact_reporter_and_output_arguments_may_be_appended(self):
+        self.start()
+        result = self.init_attempt()
+        self.evidence(appended=result['reporter_arguments'])
+        self.assertTrue(self.finish()['valid'])
+        self.evidence(appended=[])
+        # Project configuration may already supply reporters; real artifacts are still required.
+        (self.project / f'test/.cache/runs/{self.run}/attempts/E1/bundle-event.json').unlink()
+        self.assertTrue(self.finish()['valid'])
 
-    def test_output_flags_fail_before_side_effects_on_unsupported_commands(self):
-        before = sorted(self.project.rglob('*'))
-        for command in ['init', 'doctor', 'schema', 'start', 'renew', 'prepare-regression',
-                        'validate', 'report', 'release']:
-            for flag in ['--brief', '--full']:
-                with self.subTest(command=command, flag=flag):
-                    output = io.StringIO()
-                    with contextlib.redirect_stdout(output):
-                        code = wf.main([command, flag])
-                    self.assertEqual(2, code)
-                    self.assertEqual('--brief/--full only apply to status, record and collect-results',
-                                     json.loads(output.getvalue())['error'])
-        self.assertEqual(before, sorted(self.project.rglob('*')))
-
-    def test_execution_does_not_build_full_view_or_scan_history(self):
+    def test_filters_explicit_in_the_plan_remain_affected_validation(self):
         self.start()
         self.check_sources()
-        state = self.state()
-        spec, cov = wf.assets(self.project)
-        with mock.patch.object(wf, 'status', side_effect=AssertionError('full status forbidden')), \
-                mock.patch.object(wf, 'global_residuals', side_effect=AssertionError('history forbidden')):
-            wf.record_event(self.project, state, spec, cov, self.execution('fast'))
-        self.assertEqual('fast', state['executions'][-1]['execution_id'])
+        self.init_attempt(command=['pnpm', 'exec', 'playwright', 'test', '--grep=C1'])
+        self.evidence()
+        self.collect(self.finish())
+        self.assertEqual('incomplete', self.completeness()['status'])
+        self.assertEqual('affected', self.state()['report_bundles']['E1']['regression_check']['mode'])
 
-    def test_batch_cache_does_not_bypass_later_human_or_mapping_change(self):
+    def test_full_plan_requires_current_registered_discovery(self):
+        self.start()
+        self.write('full.json', {'command': ['pnpm', 'exec', 'playwright', 'test'],
+                                 'cwd': '.', 'environment': 'synthetic', 'scope': ['a','b'],
+                                 'setup_projects': ['auth'], 'regression_mode': 'full'})
+        result = self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E1',
+                          '--input', str(self.project / 'full.json'), fail=True)
+        self.assertIn('discovery', result['error'])
+        self.preflight()
+        self.write('discovery.json', {})
+        result = self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E1',
+                          '--input', str(self.project / 'full.json'), fail=True)
+        self.assertIn('changed', result['error'])
+
+    def test_full_target_difference_keeps_results_but_blocks_complete_acceptance(self):
         self.start()
         self.check_sources()
-        state = self.state()
-        spec, cov = wf.assets(self.project)
-        context = {}
-        wf.record_event(self.project, state, spec, cov, self.execution('E1'), context)
-        wf.record_event(self.project, state, spec, cov, {
-            'type': 'human', 'request_id': 'H', 'mode': 'explicit_decision',
-            'status': 'waiting', 'case_ids': ['C1']}, context)
-        with self.assertRaisesRegex(ValueError, 'human_decision_required'):
-            wf.record_event(self.project, state, spec, cov, self.execution('E2', attempt=2), context)
-        wf.record_event(self.project, state, spec, cov, {
-            'type': 'human', 'request_id': 'H', 'status': 'approved'}, context)
-        case = dict(cov['cases']['C1'], implementation='draft')
-        wf.record_event(self.project, state, spec, cov, {
-            'type': 'case', 'case_id': 'C1', 'action': 'updated', 'coverage': case}, context)
-        with self.assertRaisesRegex(ValueError, 'reviewed code'):
-            wf.record_event(self.project, state, spec, cov, self.execution('E2', attempt=2), context)
+        self.preflight()
+        self.init_attempt(regression_mode='full', scope=['a','b'])
+        self.evidence(targets=('C1',))
+        self.assertTrue(self.collect(self.finish())['collection']['complete'])
+        completeness = self.completeness()
+        self.assertEqual('incomplete', completeness['status'])
+        self.assertEqual('Synthetic C2', completeness['groups'][0]['missing'][0]['title'])
+        with mock.patch.object(wf, 'report_consistency', return_value={'status': 'checked'}):
+            result = self.record({'type':'acceptance','owner':self.owner,'status':'fully_accepted'}, fail=True)
+        self.assertIn('final-regression', result['error'])
 
-    def test_nonexecution_invalidates_selection_without_leaving_a_stale_cache(self):
+    def test_declaring_filtered_discovery_complete_does_not_hide_reviewed_test_gap(self):
+        self.start()
+        raw=self.inventory()
+        raw['suites'][0]['specs'].pop()
+        result=self.preflight(raw)
+        self.assertEqual(['C2'], result['coverage_diff']['reviewed_missing_tests'])
+        self.write('full.json', {'command':['pnpm','exec','playwright','test'], 'cwd':'.',
+                                 'environment':'synthetic','scope':['a','b'],
+                                 'setup_projects':['auth'],'regression_mode':'full'})
+        failure=self.cli('attempt-init','--run',self.run,'--owner',self.owner,'--bundle','E1',
+                         '--input',str(self.project/'full.json'),fail=True)
+        self.assertIn('omits reviewed', failure['error'])
+
+    def test_full_target_match_and_extra_target_detection(self):
         self.start()
         self.check_sources()
-        state, context = self.state(), {}
-        spec, cov = wf.assets(self.project)
-        wf.record_event(self.project, state, spec, cov, self.execution('E1'), context)
-        self.assertIn('selected', context)
-        wf.record_event(self.project, state, spec, cov, {
-            'type': 'case', 'case_id': 'C3', 'action': 'added',
-            'coverage': dict(cov['cases']['C1'], test_id='C3'),
-            'requirements': {'R1': dict(cov['requirements']['R1'], case_ids=['C1', 'C3'])}}, context)
-        self.assertEqual({}, context)
-        wf.record_event(self.project, state, spec, cov, self.execution('E3', cid='C3'), context)
-        self.assertEqual('E3', state['executions'][-1]['execution_id'])
+        self.preflight()
+        self.init_attempt(regression_mode='full', scope=['a','b'])
+        self.evidence(targets=('C1','C2'))
+        self.collect(self.finish())
+        self.assertEqual('complete', self.completeness()['status'])
+        bundles = copy.deepcopy(self.state()['report_bundles'])
+        bundles['E1']['regression_check']['actual']['business'].append(
+            {'file':'test/src/C1.spec.ts','title':'Synthetic extra','project':'chromium'})
+        result = wf.report_artifacts.regression_completeness(bundles, ['a','b'])
+        self.assertEqual('incomplete', result['status'])
+        self.assertTrue(result['groups'][0]['unexpected'])
+        bundles=copy.deepcopy(self.state()['report_bundles'])
+        evidence=bundles['E1']['regression_check']
+        evidence['actual']['business'].append(evidence['actual']['business'][0])
+        self.assertEqual('incomplete',wf.report_artifacts.regression_completeness(bundles)['status'])
+        evidence['actual']['business'].pop()
+        evidence['expected']['setup']=[{'file':'test/src/auth.setup.ts','title':'Auth','project':'auth'}]
+        incomplete=wf.report_artifacts.regression_completeness(bundles)
+        self.assertTrue(incomplete['groups'][0]['setup_differences'])
+        evidence['actual']['setup']=copy.deepcopy(evidence['expected']['setup'])
+        self.assertEqual('complete',wf.report_artifacts.regression_completeness(bundles)['status'])
 
-    def test_400_execution_batch_has_bounded_mapping_and_history_work(self):
+    def test_omitting_plan_binding_cannot_bypass_direct_collect(self):
         self.start()
         self.check_sources()
-        spec, cov = wf.assets(self.project)
-        template = cov['cases']['C1']
-        cov['cases'] = {f'C{i:04}': dict(template, test_id=f'C{i:04}') for i in range(400)}
-        cov['requirements']['R1']['case_ids'] = list(cov['cases'])
-        state, context = self.state(), {}
-        state['asset_fingerprint'] = wf.fingerprint(cov)
-        with mock.patch.object(wf, 'status', side_effect=AssertionError('no full view per receipt')), \
-                mock.patch.object(wf, 'global_residuals', side_effect=AssertionError('no history')), \
-                mock.patch.object(wf, 'test_id_index', wraps=wf.test_id_index) as index, \
-                mock.patch.object(wf, 'fingerprint', wraps=wf.fingerprint) as fingerprints, \
-                mock.patch.object(wf, 'safe_path', wraps=wf.safe_path) as paths:
-            for cid in cov['cases']:
-                wf.record_event(self.project, state, spec, cov, self.execution('E' + cid, cid=cid), context)
-        self.assertEqual(400, len(state['executions']))
-        self.assertEqual(1, index.call_count)
-        self.assertLessEqual(fingerprints.call_count, 3)
-        self.assertEqual(402, paths.call_count)  # One evidence per event, shared plan/spec once.
+        self.init_attempt()
+        self.evidence()
+        result = self.finish()
+        event = wf.load(self.project / result['input'])
+        event['bundle'].pop('attempt_plan')
+        event['bundle'].pop('attempt_plan_sha256')
+        self.write('bypass.json', event)
+        with mock.patch.object(wf, 'now', return_value=self.later.isoformat()):
+            failure = self.cli('collect-results', '--run', self.run, '--owner', self.owner,
+                               '--input', str(self.project / 'bypass.json'), fail=True)
+        self.assertIn('plan binding', failure['error'])
 
-    def test_status_reuses_coverage_paths_and_source_impact(self):
+    def test_atomic_plan_write_failure_can_retry_same_bundle(self):
+        self.start()
+        actual_atomic = wf.atomic
+        def broken(path, *args, **kwargs):
+            if path.name == 'plan.json':
+                raise OSError('synthetic plan write failure')
+            return actual_atomic(path, *args, **kwargs)
+        self.write('attempt.json', {'command':['pnpm','exec','playwright','test'], 'cwd':'.',
+                                    'environment':'synthetic','scope':['a'],'setup_projects':['auth']})
+        with mock.patch.object(wf, 'atomic', side_effect=broken):
+            self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E1',
+                     '--input', str(self.project / 'attempt.json'), fail=True)
+        parent = self.project / f'test/.cache/runs/{self.run}/attempts'
+        self.assertEqual([], list(parent.iterdir()))
+        self.assertTrue(self.init_attempt()['created'])
+
+    def test_atomic_rename_failure_cleans_only_owned_staging_directory(self):
+        self.start()
+        self.write('attempt.json', {'command':['pnpm','exec','playwright','test'], 'cwd':'.',
+                                    'environment':'synthetic','scope':['a'],'setup_projects':['auth']})
+        with mock.patch.object(wf.os, 'rename', side_effect=OSError('synthetic publication failure')):
+            self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E1',
+                     '--input', str(self.project / 'attempt.json'), fail=True)
+        parent = self.project / f'test/.cache/runs/{self.run}/attempts'
+        self.assertEqual([], list(parent.iterdir()))
+        self.assertTrue(self.init_attempt()['created'])
+
+    def test_invalid_zip_and_extra_recognized_blob_are_rejected(self):
+        self.start()
+        self.init_attempt()
+        self.evidence()
+        self.blob(valid=False)
+        self.assertIn('blob', self.finish(fail=True)['error'])
+        self.blob(valid=True)
+        self.blob(name='copied-report.zip')
+        self.assertIn('exactly one', self.finish(fail=True)['error'])
+
+    def test_wrong_blob_shard_is_rejected(self):
+        self.start()
+        self.init_attempt(command=['pnpm','exec','playwright','test','--shard=1/2'])
+        self.evidence(shard={'current':1,'total':2})
+        self.blob(shard={'current':2,'total':2})
+        self.assertIn('blob shard', self.finish(fail=True)['error'])
+
+    def test_full_shards_require_all_indices_and_matching_combined_targets(self):
         self.start()
         self.check_sources()
-        spec, cov = wf.assets(self.project)
-        with mock.patch.object(wf, 'source_affected', wraps=wf.source_affected) as affected, \
-                mock.patch.object(wf, 'safe_path', wraps=wf.safe_path) as paths:
-            wf.status(self.project, self.state(), spec, cov)
-        self.assertEqual(2, affected.call_count)
-        self.assertEqual(4, paths.call_count)
+        self.preflight()
+        for current, cid in [(1,'C1'),(2,'C2')]:
+            bid='S'+str(current)
+            self.init_attempt(bundle=bid, scope=['a','b'], regression_mode='full',
+                              command=['pnpm','exec','playwright','test',f'--shard={current}/2'])
+            self.evidence(bid=bid, targets=(cid,), shard={'current':current,'total':2})
+            self.collect(self.finish(bid))
+            status=self.completeness()
+            if current==1:
+                self.assertEqual('incomplete', status['status'])
+                self.assertEqual([2], status['groups'][0]['missing_shards'])
+            else:
+                self.assertEqual('complete', status['status'])
 
-    def test_default_record_is_brief_and_explicit_full_preserves_details(self):
+    def test_unsupported_host_is_null_but_recognized_empty_codex_is_zero(self):
         self.start()
-        self.check_sources()
-        self.write('brief.json', self.execution('brief'))
-        with mock.patch.object(wf, 'global_residuals', side_effect=AssertionError('history forbidden')):
-            brief = self.cli('record', '--run', self.run, '--owner', self.owner,
-                             '--input', str(self.project / 'brief.json'))
-        self.assertNotIn('regression_inventory', brief)
-        self.assertFalse(brief['global_residuals_checked'])
-        self.assertEqual(1, brief['counts']['executions'])
-        self.assertEqual(['C1', 'C2'], brief['regression_ready'])
-        full = self.cli('status', '--run', self.run, '--full')
-        self.assertIn('regression_inventory', full)
-        self.assertTrue(full['global_residuals_checked'])
-        self.assertLess(len(json.dumps(brief)), len(json.dumps(full)))
-
-    def test_missing_assets_offer_init_and_doctor_is_read_only(self):
-        (self.project / 'test/spec.md').unlink()
-        before = sorted(str(p.relative_to(self.project)) for p in self.project.rglob('*'))
-        error = self.cli('status', fail=True)
-        self.assertIn('init --project', error['error'])
-        result = self.cli('doctor', fail=True)
-        self.assertTrue(any(c['check'] == 'test/spec.md' and c['status'] == 'error' for c in result['checks']))
-        self.assertEqual(before, sorted(str(p.relative_to(self.project)) for p in self.project.rglob('*')))
-
-    def test_doctor_aggregates_parse_missing_coverage_and_gitignore(self):
-        self.write('test/spec.md', 'not a config')
-        (self.project / 'test/plans/coverage.json').unlink()
-        result = self.cli('doctor', fail=True)
-        errors = {c['check'] for c in result['checks'] if c['status'] == 'error'}
-        self.assertEqual({'test/spec.md', 'test/plans/coverage.json', 'cache_gitignore'}, errors)
-        self.assertIn('doctor', self.cli('validate', fail=True)['error'])
-
-    def test_doctor_uses_actual_git_ignore_policy(self):
-        subprocess.run(['git', 'init', '--quiet', str(self.project)], check=True, capture_output=True)
-        self.write('.gitignore', '/test/.cache/\n')
-        result = self.cli('doctor')
-        self.assertTrue(result['valid'])
-        self.write('.gitignore', '/test/.cache/*\n!test/.cache/__e2e_ignore_probe__\n')
-        self.cli('doctor', fail=True)
-
-    def test_doctor_ignore_probe_survives_windows_newline_translation(self):
-        subprocess.run(['git', 'init', '--quiet', str(self.project)], check=True, capture_output=True)
-        self.write('.gitignore', '/test/.cache/*\n!test/.cache/__e2e_ignore_probe__\n')
-        run = subprocess.run
-        def windows_text_input(*args, **kwargs):
-            if kwargs.get('text') and isinstance(kwargs.get('input'), str):
-                kwargs['input'] = kwargs['input'].replace('\n', '\r\n')
-            return run(*args, **kwargs)
-        with mock.patch.object(wf.subprocess, 'run', side_effect=windows_text_input):
-            result = self.cli('doctor', fail=True)
-        checks = {item['check']: item['status'] for item in result['checks']}
-        self.assertEqual('error', checks['cache_gitignore'])
-
-    def test_preflight_commit_merges_batches_added_while_unlocked(self):
-        self.start()
-        concurrent = {'scopes': ['b'], 'retention': {'skipped': True, 'reason': 'synthetic'}}
-        def cleanup(project, plan):
-            state = self.state()
-            state['regression_preflight'] = {
-                'freshness_marker': state['freshness_marker'],
-                'config_fingerprint': state['config_fingerprint'],
-                'scopes': ['b'], 'cleanup_batches': [concurrent], 'retention': concurrent['retention']}
-            self.write('test/.cache/runs/' + self.run + '/state.json', state)
-            return {'completed': True, 'files': 0, 'bytes': 0}
-        with mock.patch.object(wf.retention, 'make_plan', return_value={}), \
-                mock.patch.object(wf.retention, 'apply_plan', side_effect=cleanup):
-            self.cli('prepare-regression', '--run', self.run, '--owner', self.owner, '--scopes', 'a')
-        result = self.state()['regression_preflight']
-        self.assertEqual(['a', 'b'], result['scopes'])
-        self.assertEqual(concurrent, result['cleanup_batches'][0])
-        self.assertEqual(2, len(result['cleanup_batches']))
-        self.assertEqual(['a'], result['plan_scopes'])
-        # Individually cleaned concurrent scopes do not imply mixed bundles were cleaned.
-        with mock.patch.object(wf.retention, 'make_plan', wraps=wf.retention.make_plan) as plan:
-            self.cli('prepare-regression', '--run', self.run, '--owner', self.owner)
-        self.assertEqual(['a', 'b'], plan.call_args.args[1])
-
-    def test_schema_is_available_without_project_or_state(self):
-        execution = wf.event_schema('execution')
-        self.assertEqual('execution', execution['properties']['type']['const'])
-        self.assertIn('started_at', execution['required'])
-        bundle = wf.event_schema('report_bundle')
-        self.assertIn('blob_reports', bundle['properties']['bundle']['required'])
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = wf.main(['schema', '--type', 'execution'])
-        self.assertEqual(0, code)
-        self.assertEqual(execution, json.loads(output.getvalue()))
-
-    def test_schema_encodes_dependency_and_failure_detail_conditions(self):
-        schema = wf.event_schema('execution')
-        dependency = next(rule['then'] for rule in schema['allOf']
-                          if rule.get('if') == {'required': ['blocked_by']})
-        self.assertEqual({'runner_result', 'reason'}, set(dependency['required']))
-        self.assertEqual({'const': 'notrun'}, dependency['properties']['result'])
-        self.assertEqual({'const': 'skip'}, dependency['properties']['runner_result'])
-        detail = schema['properties']['failure_details']
-        self.assertEqual('object', detail['type'])
-        self.assertEqual({'expected', 'actual', 'phase', 'classification', 'location', 'cleanup'},
-                         set(detail['required']))
-        self.assertIn('runtime', schema['properties']['blocked_by']['description'])
-        self.assertNotEqual(False, schema.get('additionalProperties'))
-
-    def test_dependency_target_and_present_failure_details_are_checked_at_runtime(self):
-        self.start()
-        self.check_sources()
-        for detail in [{}, None, {'expected': 'pass'}]:
-            with self.subTest(detail=detail):
-                result = self.record(self.execution('bad', failure_details=detail), fail=True)
-                self.assertIn('failure_details requires', result['error'])
-        self.record(self.execution('setup-pass', setup=True, case_ids=[]))
-        event = self.execution('blocked', result='notrun', runner_result='skip',
-                               blocked_by='setup-pass', reason='dependency')
-        self.assertIn('failed Setup', self.record(event, fail=True)['error'])
-        self.record(self.execution('setup-fail', setup=True, case_ids=[], result='fail', attempt=2))
-        event['blocked_by'] = 'setup-fail'
-        event['result'] = 'pass'
-        self.assertIn('dependency skip requires', self.record(event, fail=True)['error'])
-        event['result'] = 'notrun'
-        self.record(event)
-        self.assertEqual('blocked', self.state()['executions'][-1]['execution_id'])
-
-
-if __name__ == '__main__':
-    unittest.main()
+        a=datetime.now(timezone.utc)-timedelta(seconds=3)
+        b=a+timedelta(seconds=1)
+        request={'session':{'started_at':a.isoformat(),'ended_at':b.isoformat(),
+                            'evidence':['host.jsonl'],'log':'host.jsonl'}}
+        self.write('timing.json',request)
+        for supported in (False,True):
+            payload={'type':'message'} if supported else {'type':'tool_use'}
+            rows=[{'timestamp':stamp.isoformat(),'type':'response_item' if supported else 'assistant',
+                   'payload':payload} for stamp in (a,b)]
+            self.write('host.jsonl','\n'.join(json.dumps(row) for row in rows))
+            result=self.cli('timing','--run',self.run,'--input',str(self.project/'timing.json'))['session']
+            if supported:
+                self.assertEqual(0,result['tool_calls'])
+                self.assertEqual('supported',result['host_log_status'])
+            else:
+                self.assertIsNone(result['tool_calls'])
+                self.assertIsNone(result['tool_counts'])
+                self.assertIsNone(result['nonzero_tool_results'])
+                self.assertEqual('unsupported_host_log',result['host_log_status'])

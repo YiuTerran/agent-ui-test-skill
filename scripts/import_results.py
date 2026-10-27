@@ -301,7 +301,7 @@ def import_results(project, run_id, bundle_id, pending_bundle=None):
         require(bundle is not None, 'bundle_not_registered')
         require(bundle['bundle_id'] == bundle_id, 'bundle_id_mismatch')
         require(set(bundle['scope']) <= set(state['scopes']), 'bundle_scope_outside_run')
-        reports.recheck_bundle(project, run_id, bundle)
+        reports.recheck_bundle(project, run_id, bundle, require_plan=state.get('native_merge_required', False))
         raw_bytes = reports.path_in(project, bundle['execution_result']).read_bytes()
         require(hashlib.sha256(raw_bytes).hexdigest() == bundle['artifact_sha256'][bundle['execution_result']],
                 'bundle_changed_during_import')
@@ -428,7 +428,7 @@ def import_results(project, run_id, bundle_id, pending_bundle=None):
         counts['dependency_blocked'] = sum(bool(e.get('blocked_by')) for e in events)
         require(counts['raw_slots'] == counts['mapped'] + counts['unresolved'] + counts['already_registered'],
                 'slot_accounting_mismatch')
-        reports.recheck_bundle(project, run_id, bundle)
+        reports.recheck_bundle(project, run_id, bundle, require_plan=state.get('native_merge_required', False))
         require(state_bytes == state_path.read_bytes() and cov_bytes == cov_path.read_bytes(),
                 'inputs_changed_during_import')
         return {'events': events, 'unresolved': unresolved, 'counts': counts}

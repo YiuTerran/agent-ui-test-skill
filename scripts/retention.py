@@ -1027,6 +1027,9 @@ def selection(tree, scopes, current_run=None, previously=None):
             continue
         state = states[names[3]]
         bundle = None
+        if names[4] == 'attempts' and names[5].startswith('.'):
+            exclude('attempt_staging_directory')
+            continue
         if names[4] == 'attempts' and len(names) >= 7:
             bprefix = '/'.join(names[:6])
             bundle = bundles.get(bprefix)

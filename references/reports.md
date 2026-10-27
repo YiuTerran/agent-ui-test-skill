@@ -20,11 +20,11 @@ test/.cache/runs/<run-id>/
   merged/playwright/        # 本轮全部blob合并的原生HTML及附件
 ```
 
-选择执行范围前先完成[覆盖缺口门禁](workflow.md#覆盖缺口门禁与模块补全)。发现全部现有test只证明现有代码清单完整；必须与需求及计划比对，缺失场景默认按模块探索并补代码。最终全量CLI在可完成的补全结束后执行，只有用户明确选择本轮跳过的范围可以仅回归；未审批或不可执行的目标分别列受阻。
+选择执行范围前先完成[覆盖缺口门禁](workflow.md#覆盖缺口门禁与模块补全)。发现全部现有test只证明现有代码清单完整；必须与需求及计划比对，按模块列缺口并取得用户的按模块新增/全部新增/本轮跳过新增选择。仅对获选范围探索并补代码；收尾全量CLI覆盖现有自动化，未获选的缺口保留，未审批或不可执行的目标分别列受阻。
 
 执行writer在运行前配置JSON、HTML、blob与runner输出目录。Windows用`py -3`，相对证据路径用`/`，PowerShell用`$env:变量名 = "值"`。沿用项目注入机制；Playwright可使用`PLAYWRIGHT_JSON_OUTPUT_FILE`、`PLAYWRIGHT_HTML_OUTPUT_DIR`、`PLAYWRIGHT_BLOB_OUTPUT_DIR`和`PLAYWRIGHT_HTML_OPEN=never`配合`--reporter=list,json,html,blob`、`--output`，或在项目配置显式设置各reporter路径，参数以安装版本为准。路径落在本次attempt目录；保留真实退出码，测试失败也收集和清理。
 
-新run固定`native_merge_required=true`，每次CLI必须保留原始JSON和至少一个原生blob ZIP，正常同时生成同次HTML；最终必须核验全轮原生合并。仅旧run兼容JSON-only（html_report:null、html_origin:none），明确受限，不能用于新执行或推断默认目录HTML。HTML格式不受支持也不构成省略新run证据的许可。
+新run固定`native_merge_required=true`，每个bundle必须绑定当前schema的Attempt计划和摘要，每次CLI保留原始JSON与单个原生blob ZIP，正常同时生成同次HTML；最终核验全轮原生合并。完整验收要求regression_completeness=complete；缺少bundle、只有affected或旧式直接execution均不能替代收尾full。仅旧run兼容JSON-only（html_report:null、html_origin:none）和未声明用途的not_declared，明确受限；HTML格式不受支持时保留原始证据并报告受阻。
 
 开发验证跑受影响项，收尾默认全量现有自动化。首次回归前prepare-regression、配额与冲突规则见[最小命令顺序](workflow.md#最小命令顺序)；拆命令隔离输出/认证，分别领取配额。将真实发现与完整状态的regression_inventory核对全目标，未审批/缺依赖/权限不足逐项受阻，不静默过滤；默认简报无需展开全清单。
 
@@ -35,6 +35,10 @@ test/.cache/runs/<run-id>/
 ## 绑定与校验
 
 执行者准备一个`report_bundle`事件，由主owner收集：
+
+优先用[Attempt模板](local-tools.md#attempt准备与事件生成)准备目录和reporter参数，实际CLI回执落command.json，attempt-bundle统一检查并生成事件；已有完整且真实的bundle事件仍可直接collect-results，正常不额外调用attempt-check或validate-input。
+
+新Attempt生成的bundle保留plan路径和摘要，直接采集也执行相同契约。全量目标完整性单列于summary.regression_completeness及交付报告，比较完整发现清单与实际目标，保留缺失、多余、Setup和分片差集；collect-results的complete仅指原始结果绑定完整，不能替代全量目标完整性。
 
 | bundle字段 | 必填性 | 值/门禁 |
 | --- | --- | --- |
@@ -146,7 +150,7 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 
 最终人类报告同时说明需求覆盖与现有测试执行，按模块列出有效需求数、计划case数、已有有效独立自动化、本轮新增/维护、已探索待编码、未探索/缺失代码、审批或环境阻塞、明确非自动化处置及用户本轮跳过的范围和数量。需求、case和runner test使用各自分母，重试不增加唯一case数；本轮新增可作为有效覆盖的子集，阻塞原因可重叠，不能将所有列机械相加。
 
-从coverage、真实发现和本轮task/case/human记录汇总到现有人类报告，不增加逐动作统计文件；脚本未提供的字段由主Agent按证据补充，未知记null。用户明确跳过时，主要报告入口旁及最终答复突出“指定范围本轮经用户选择仅回归”，列决定引用、模块和剩余缺口；本轮决定不自动继承。缺失仍存在时，即使全部现有test通过，也只称“现有自动化全部通过”，不能称需求全覆盖或全部验收完成。
+从coverage、真实发现和本轮automation_expansion/task/case/human记录汇总到现有人类报告，不增加逐动作统计文件；脚本未提供的字段由主Agent按证据补充，未知记null。主要报告入口旁及最终答复说明本轮新增选择、决定引用、模块和剩余缺口；部分模块或全部跳过新增时突出对应范围只回归已有自动化，待选择仍保留为待选择。本轮决定不自动继承。缺失仍存在时，即使全部现有test通过，也只称“现有自动化全部通过”，不能称需求全覆盖或全部验收完成。
 
 ## Setup失败与未执行
 

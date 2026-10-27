@@ -260,6 +260,43 @@ def covered(project, cov, cid, context=None):
     return not coverage_reasons(project, cov, cid, context)
 
 
+def automation_gap(project, state, cov, cid, context=None, *, include_discovery=True):
+    case = cov['cases'].get(cid, {})
+    if case.get('execution') != 'automation' or case.get('implementation') == 'retired':
+        return False
+    if include_discovery and cid in state.get('automation_gap_case_ids', []):
+        return True
+    reasons = coverage_reasons(project, cov, cid, context)
+    return any(r in {'implementation_not_valid', 'legacy_group_requires_independent_test',
+                     'missing_test_id', 'missing_title', 'missing_spec_path', 'unsafe_spec_path'}
+               or r.startswith('missing_spec_file:') for r in reasons)
+
+
+def expansion_allowed(state, cid, scope):
+    decision = state.get('automation_expansion') or {}
+    return (decision.get('run_id') == state['run_id']
+            and decision.get('mode') in {'all', 'modules'}
+            and scope in decision.get('scopes', [])
+            and cid in decision.get('gap_case_ids', []))
+
+
+def expansion_view(project, state, cov, context=None):
+    decision = state.get('automation_expansion')
+    modules = {}
+    for cid, case in scoped_cases(state, cov).items():
+        if automation_gap(project, state, cov, cid, context):
+            modules.setdefault(case['scope'], []).append(cid)
+    gaps = {cid for ids in modules.values() for cid in ids}
+    approved = sorted(cid for cid in gaps if expansion_allowed(state, cid, cov['cases'][cid]['scope']))
+    reviewed = set((decision or {}).get('gap_case_ids', []))
+    skipped = sorted((gaps & reviewed) - set(approved)) if decision else []
+    return {'decision': decision, 'gap_count': len(gaps),
+            'modules': {scope: sorted(ids) for scope, ids in sorted(modules.items())},
+            'approved_case_ids': approved, 'skipped_case_ids': skipped,
+            'pending_case_ids': sorted(gaps - reviewed),
+            'choices': ['modules', 'all', 'skip']}
+
+
 def run_path(project, run_id):
     check(bool(re.fullmatch(r'[A-Za-z0-9_-]+', run_id or '')), 'invalid run ID')
     return project / 'test/.cache/runs' / run_id
@@ -273,7 +310,7 @@ def owner_check(state, owner):
     check((dt(now()) - dt(claim['renewed_at'])).total_seconds() < lease, 'claim expired; use start --reclaim --reason')
 
 
-def renew(project, state, spec, cov, owner):
+def renew(project, state, spec, cov, owner, full=True):
     """A heartbeat is not a recovery or a new source-observation round."""
     owner_check(state, owner)
     check(state['acceptance'] not in TERMINAL, 'ended run requires explicit start --resume or --new-round')
@@ -282,7 +319,7 @@ def renew(project, state, spec, cov, owner):
     check(state['asset_fingerprint'] == fingerprint(cov), 'coverage changed; start --resume and review artifacts')
     state['claim']['renewed_at'] = now()
     atomic(run_path(project, state['run_id']) / 'state.json', state)
-    return status(project, state, spec, cov)
+    return status(project, state, spec, cov, full=full, include_history=full)
 
 
 def scoped_cases(state, cov):
@@ -489,7 +526,10 @@ def status(project, state, spec, cov, full=True, include_history=True):
         steps.append('obtain_readable_source_or_confirmed_baseline')
     if 'delegation_unavailable' in reasons:
         steps.append('restore_delegation_or_record_explicit_alternative')
-    if work or unmapped or planning:
+    expansion = expansion_view(project, state, cov, context)
+    if expansion['pending_case_ids'] or unmapped or planning:
+        steps.append('ask_user_to_choose_automation_expansion_scope')
+    if work and (expansion['approved_case_ids'] or not expansion['gap_count']):
         steps.append('fill_only_mapping_review_or_code_gaps')
     if ready:
         steps.append('run_independent_stable_regression')
@@ -511,6 +551,7 @@ def status(project, state, spec, cov, full=True, include_history=True):
             'run_id': state['run_id'], 'freshness_marker': state['freshness_marker'], 'acceptance': state['acceptance'], 'claim': state.get('claim'),
             'source_checks': checks, 'residual_resources': residual, 'global_residual_runs': global_resources, 'pending_humans': pending,
             'blocked_cases': blocked, 'regression_ready': ready, 'work_needed': work, 'work_needed_reasons': work_reasons, 'nonautomated_cases': dispositions,
+            'automation_expansion': expansion,
             'requirements_updates_paused': [sid for sid, value in checks.items() if value['status'] in {'unknown', 'unavailable'}],
             'missing_configuration': missing, 'unmapped_requirements': unmapped, 'planning_needed_scopes': planning, 'next_steps': steps, 'usage_known': bool(state['usage']), 'coverage_asset_drift': state['asset_fingerprint'] != fingerprint(cov)}
 
@@ -523,7 +564,7 @@ def status(project, state, spec, cov, full=True, include_history=True):
     keys = ['run_id', 'freshness_marker', 'claim', 'acceptance', 'counts', 'blocked_cases',
             'regression_ready', 'work_needed', 'work_needed_reasons', 'next_steps',
             'missing_configuration', 'configuration_drift', 'coverage_asset_drift',
-            'global_residuals_checked']
+            'global_residuals_checked', 'automation_expansion']
     return {key: result[key] for key in keys}
 
 
@@ -583,10 +624,34 @@ def record_event(project, state, spec, cov, event, context=None):
         state['invalidated'] = sorted(set(state['invalidated']) | set(event.get('invalidate_case_ids', [])))
         for cid in event.get('invalidate_case_ids', []):
             state.setdefault('invalidation_seq', {})[cid] = event['seq']
+    elif kind == 'automation_expansion':
+        check(event.get('owner') == state['claim']['owner'], 'automation expansion requires the main owner')
+        mode = event.get('mode')
+        check(mode in {'all', 'modules', 'skip'}, 'automation expansion mode must be all, modules or skip')
+        scopes, gaps = event.get('scopes'), event.get('gap_case_ids')
+        check(isinstance(scopes, list) and all(isinstance(s, str) for s in scopes)
+              and len(scopes) == len(set(scopes)) and set(scopes) <= set(state['scopes']),
+              'automation expansion scopes must be unique run scopes')
+        check(isinstance(gaps, list) and gaps and all(isinstance(cid, str) and cid for cid in gaps)
+              and len(gaps) == len(set(gaps)), 'automation expansion requires unique gap_case_ids')
+        check((mode == 'all' and set(scopes) == set(state['scopes']))
+              or (mode == 'modules' and scopes) or (mode == 'skip' and not scopes),
+              'automation expansion mode/scopes mismatch')
+        check(isinstance(event.get('user_reply'), str) and event['user_reply'].strip()
+              and event.get('evidence'), 'automation expansion requires the actual user reply and evidence')
+        state['automation_expansion'] = dict(event, run_id=state['run_id'])
     elif kind == 'task':
         check(event.get('phase') in {'impact', 'clarify', 'case_review', 'exploration', 'code', 'execution', 'acceptance'}, 'invalid task phase')
         check(event.get('status') in {'pending', 'running', 'blocked', 'approved', 'complete'}, 'invalid task status')
         check(event.get('owner'), 'task owner required')
+        if event['phase'] in {'exploration', 'code'} and event['status'] in {'running', 'approved', 'complete'}:
+            targets = event.get('case_ids') or [cid for cid, case in selected.items()
+                                               if not event.get('source_id')
+                                               or case.get('source_id') == event['source_id']]
+            for cid in targets:
+                if automation_gap(project, state, cov, cid):
+                    check(expansion_allowed(state, cid, selected[cid]['scope']),
+                          'user automation expansion choice required before exploration/code: ' + cid)
         if event.get('source_id'):
             check(event['source_id'] in needed_sources(state, spec), 'task source outside selected scopes')
             event['source_version'] = source_version(state['source_checks'].get(event['source_id'], {}))
@@ -620,6 +685,17 @@ def record_event(project, state, spec, cov, event, context=None):
         cid = event['case_id']
         for field in ['exploration', 'code']:
             check(event.get(field, 'none') in {'none', 'pending', 'running', 'complete', 'blocked'}, 'invalid case work state')
+        prior_case = cov['cases'].get(cid, {})
+        proposed = event.get('coverage', prior_case)
+        addition = (event['action'] == 'added' or event.get('code_action') == 'added'
+                    or not prior_case or prior_case.get('execution') != 'automation')
+        work_started = (event.get('exploration') in {'running', 'complete'}
+                        or event.get('code') in {'running', 'complete'}
+                        or event.get('code_action') == 'modified')
+        if proposed.get('execution') == 'automation' and (addition or (
+                automation_gap(project, state, cov, cid) and (work_started or 'coverage' in event))):
+            check(expansion_allowed(state, cid, proposed.get('scope')),
+                  'user automation expansion choice required before adding automation: ' + cid)
         if 'coverage' in event or 'requirements' in event:
             sid = event.get('coverage', cov['cases'].get(cid, {})).get('source_id')
             src = state['source_checks'].get(sid, {})
@@ -648,6 +724,8 @@ def record_event(project, state, spec, cov, event, context=None):
         state['case_actions'][cid] = dict(prior_action, **event)
         if event.get('code') == 'complete' and covered(project, cov, cid):
             state['invalidated'] = [item for item in state['invalidated'] if item != cid]
+            state['automation_gap_case_ids'] = [item for item in state.get('automation_gap_case_ids', [])
+                                                if item != cid]
     elif kind == 'baseline':
         sid = event['source_id']
         src = state['source_checks'].get(sid, {})
@@ -769,7 +847,14 @@ def record_event(project, state, spec, cov, event, context=None):
         if state.get('native_merge_required', False):
             check(isinstance(bundle.get('blob_reports'), list) and bundle['blob_reports'],
                   'current invocation requires at least one native Playwright blob report')
-        checked = report_artifacts.inspect_bundle(project, state['run_id'], bundle)
+        checked = report_artifacts.inspect_bundle(
+            project, state['run_id'], bundle, require_plan=state.get('native_merge_required', False))
+        if checked.get('regression_check'):
+            inputs = checked['regression_check']
+            check(inputs['freshness_marker'] == state['freshness_marker']
+                  and inputs['config_fingerprint'] == fingerprint(spec)
+                  and inputs['asset_fingerprint'] == fingerprint(cov)
+                  and not state.get('recovery_required'), 'attempt inputs differ from the current reviewed run')
         state.setdefault('report_bundles', {})[bid] = checked
     elif kind == 'merged_report':
         state['merged_report'] = report_artifacts.inspect_merged_report(
@@ -804,6 +889,11 @@ def record_event(project, state, spec, cov, event, context=None):
         check(event.get('owner') == state['claim']['owner'], 'acceptance must be recorded by main owner')
         check(event.get('status') in {'in_progress', 'blocked', 'partially_accepted', 'fully_accepted', 'completed_with_failures', 'partially_blocked', 'aborted'}, 'invalid acceptance state')
         if event['status'] == 'fully_accepted':
+            native = state.get('native_merge_required', False)
+            regression = report_artifacts.regression_completeness(
+                state.get('report_bundles', {}), state['scopes'], required=native)
+            check(regression['status'] == 'complete' if native else regression['status'] != 'incomplete',
+                  'full acceptance requires complete final-regression targets and all planned shards')
             if state.get('report_bundles'):
                 check(report_consistency(project, state)['status'] == 'checked', 'full acceptance requires consistent complete report receipts')
             view = status(project, state, spec, cov)
@@ -862,6 +952,7 @@ def report_consistency(project, state):
         try:
             if state.get('native_merge_required', False):
                 check(bundle.get('blob_reports'), 'native blob report missing for current invocation')
+                check(bundle.get('attempt_plan'), 'native invocation requires its attempt plan binding')
             recovered = [p for p in bundle.get('artifact_sha256', {}) if retention.is_recycled(project, p)]
             if recovered:
                 check(state['acceptance'] in TERMINAL, 'active run cannot use recycled report evidence')
@@ -875,7 +966,8 @@ def report_consistency(project, state):
                                  'runner_counts': bundle.get('runner_counts'),
                                  'receipt_revalidation': 'not_claimed_after_policy_recycling'})
                 continue
-            report_artifacts.recheck_bundle(project, state['run_id'], bundle)
+            report_artifacts.recheck_bundle(
+                project, state['run_id'], bundle, require_plan=state.get('native_merge_required', False))
             raw = load(safe_path(project, bundle['execution_result']))
             expected = report_artifacts.result_slots(raw)
             receipts = [e for e in state['executions'] if e.get('bundle_id') == bid]
@@ -991,6 +1083,7 @@ def summary(project, state, spec, cov):
     return {'schema_version': SCHEMA, 'run_id': state['run_id'], 'generated_at': generated,
             'counts': counts, 'cases': cases, 'issues': state['issues'], 'resources': state['resources'],
             'source_observations': state['source_checks'],
+            'automation_expansion': expansion_view(project, state, cov),
             'report_bundles': state.get('report_bundles', {}),
             'merged_report': state.get('merged_report'),
             'native_merge_required': state.get('native_merge_required', False),
@@ -1000,6 +1093,9 @@ def summary(project, state, spec, cov):
                              'merged_html': (state['merged_report']['html_report'] if state.get('merged_report') and
                                              not retention.is_recycled(project, state['merged_report']['html_report']) else None)},
             'report_consistency': report_consistency(project, state),
+            'regression_completeness': report_artifacts.regression_completeness(
+                state.get('report_bundles', {}), state['scopes'],
+                required=state.get('native_merge_required', False)),
             'performance': {'source_cache_hits': sum(v.get('cache_hit') is True for v in state['source_checks'].values()),
                             'source_observations': len(state['source_checks']),
                             'regression_preflight': state.get('regression_preflight')},
@@ -1047,7 +1143,7 @@ def initialize(project):
             'discovered_commands': commands, 'missing_configuration': missing}
 
 
-def start(project, args, spec, cov):
+def start(project, args, spec, cov, full=True):
     check(args.owner, '--owner required')
     check(not args.reclaim or args.reason, '--reclaim requires --reason')
     scopes = sorted(set(args.scopes.split(','))) if args.scopes else sorted(spec.get('scope', {}).get('fixed', []))
@@ -1131,6 +1227,8 @@ def start(project, args, spec, cov):
                  'tasks': {}, 'humans': {}, 'case_actions': {}, 'resources': {}, 'issues': {}, 'usage': {},
                  'events': [], 'executions': [], 'phase_times': [], 'resume_history': [], 'invalidated': [],
                  'delegation_blocks': [], 'invalidation_seq': {}, 'asset_fingerprint': fingerprint(cov)}
+        state['automation_gap_case_ids'] = [cid for cid in scoped_cases(state, cov)
+                                            if automation_gap(project, state, cov, cid)]
         latest = {}
         for prior_path in prior_finished:
             prior = superseded.get(prior_path) or load(prior_path)
@@ -1183,7 +1281,7 @@ def start(project, args, spec, cov):
     for prior_path, prior in superseded.items():
         atomic(prior_path, prior)
     atomic(path, state)
-    return status(project, state, spec, cov)
+    return status(project, state, spec, cov, full=full, include_history=full)
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -1191,7 +1289,7 @@ class JsonArgumentParser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
-def collect_results(project, state, spec, cov, owner, request, full=False):
+def collect_results(project, state, spec, cov, owner, request, full=False, dry_run=False):
     """Register and import one invocation in memory; commit only after all gates pass."""
     check(state['acceptance'] not in TERMINAL, 'collect-results requires an active round')
     check(state.get('config_fingerprint', fingerprint(spec)) == fingerprint(spec),
@@ -1220,11 +1318,42 @@ def collect_results(project, state, spec, cov, owner, request, full=False):
     for event in batch['events']:
         record_event(project, updated, spec, cov, dict(event, writer=owner), context)
     updated['claim']['renewed_at'] = now()
-    atomic(run_path(project, state['run_id']) / 'state.json', updated)
+    if not dry_run:
+        atomic(run_path(project, state['run_id']) / 'state.json', updated)
     return dict(status(project, updated, spec, cov, full=full, include_history=full), collection={
-        'bundle_id': bid, 'committed': True, 'complete': not batch['unresolved'],
+        'bundle_id': bid, 'committed': not dry_run, 'complete': not batch['unresolved'],
         'events_recorded': len(batch['events']), 'counts': batch['counts'],
         'unresolved': batch['unresolved']})
+
+
+def apply_events(project, state, spec, cov, owner, events, writer=None):
+    """Replay on copies so input validation and actual recording share every gate."""
+    check(isinstance(events, (dict, list)), 'input must be an event or nonempty event array')
+    events = [events] if isinstance(events, dict) else events
+    check(events, 'input must be an event or nonempty event array')
+    check(state['asset_fingerprint'] == fingerprint(cov) or state['recovery_required'],
+          'coverage changed externally; resume and review artifacts')
+    updated, newcov = copy.deepcopy(state), copy.deepcopy(cov)
+    context = {}
+    writer = writer or owner
+    for event in events:
+        check(isinstance(event, dict), 'event must be an object')
+        if writer != owner:
+            check(event.get('type') == 'task', 'delegated writers may submit their assigned task receipts only')
+            assigned = updated['tasks'].get(event.get('task_id'), {})
+            check(assigned.get('owner') == writer and event.get('owner') == writer,
+                  'writer is not assigned to this task')
+            check(event.get('case_ids', assigned.get('case_ids', [])) == assigned.get('case_ids', [])
+                  and event.get('source_id', assigned.get('source_id')) == assigned.get('source_id'),
+                  'writer may not expand assigned task scope')
+        record_event(project, updated, spec, newcov, dict(event, writer=writer), context)
+    if newcov != cov:
+        errors = asset_errors(project, spec, newcov)
+        check(not errors, 'coverage mappings invalid: ' + '; '.join(errors))
+    updated['claim']['renewed_at'] = now()
+    if newcov != cov or any(e.get('type') == 'recovery_review' for e in events):
+        updated['asset_fingerprint'] = fingerprint(newcov)
+    return updated, newcov
 
 
 
@@ -1283,13 +1412,15 @@ def event_schema(event_type):
 
 def main(argv=None):
     parser = JsonArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['doctor', 'schema', 'init', 'start', 'renew', 'prepare-regression', 'collect-results', 'record', 'status', 'validate', 'report', 'release'])
+    helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'timing'}
+    parser.add_argument('command', choices=['doctor', 'schema', 'init', 'start', 'renew', 'prepare-regression', 'collect-results', 'record', 'status', 'validate', 'report', 'release', *sorted(helpers)])
     parser.add_argument('--project')
     parser.add_argument('--type', dest='event_type')
     parser.add_argument('--run')
     parser.add_argument('--owner')
     parser.add_argument('--writer')
     parser.add_argument('--input')
+    parser.add_argument('--bundle')
     parser.add_argument('--resume')
     parser.add_argument('--scopes')
     parser.add_argument('--reclaim', action='store_true')
@@ -1312,6 +1443,14 @@ def main(argv=None):
         check(args.project, '--project required')
         project = Path(args.project).resolve()
         check(project.is_dir(), 'project directory does not exist')
+        if args.command in helpers:
+            helper_spec = importlib.util.spec_from_file_location(
+                'e2e_workflow_tools', Path(__file__).with_name('workflow_tools.py'))
+            helper = importlib.util.module_from_spec(helper_spec)
+            helper_spec.loader.exec_module(helper)
+            result = helper.dispatch(globals(), project, args)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2 if result.get('valid') is False else 0
         if args.command == 'doctor':
             result = doctor(project)
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1399,27 +1538,8 @@ def main(argv=None):
                         result = collect_results(project, state, spec, cov, args.owner, load(Path(args.input)), full=args.full)
                     elif args.command == 'record':
                         check(args.input, '--input required')
-                        check(state['asset_fingerprint'] == fingerprint(cov) or state['recovery_required'], 'coverage changed externally; resume and review artifacts')
                         events = load(Path(args.input))
-                        if isinstance(events, dict):
-                            events = [events]
-                        check(isinstance(events, list) and events, 'input must be an event or nonempty event array')
-                        updated, newcov = copy.deepcopy(state), copy.deepcopy(cov)
-                        context = {}
-                        for event in events:
-                            writer = args.writer or args.owner
-                            if writer != args.owner:
-                                check(event.get('type') == 'task', 'delegated writers may submit their assigned task receipts only')
-                                assigned = updated['tasks'].get(event.get('task_id'), {})
-                                check(assigned.get('owner') == writer and event.get('owner') == writer, 'writer is not assigned to this task')
-                                check(event.get('case_ids', assigned.get('case_ids', [])) == assigned.get('case_ids', []) and event.get('source_id', assigned.get('source_id')) == assigned.get('source_id'), 'writer may not expand assigned task scope')
-                            event = dict(event, writer=writer)
-                            record_event(project, updated, spec, newcov, event, context)
-                        if newcov != cov:
-                            check(not asset_errors(project, spec, newcov), 'coverage mappings invalid: ' + '; '.join(asset_errors(project, spec, newcov)))
-                        updated['claim']['renewed_at'] = now()
-                        if newcov != cov or any(e.get('type') == 'recovery_review' for e in events):
-                            updated['asset_fingerprint'] = fingerprint(newcov)
+                        updated, newcov = apply_events(project, state, spec, cov, args.owner, events, args.writer)
                         if newcov != cov:
                             atomic(project / 'test/plans/coverage.json', newcov)
                         atomic(path, updated)
@@ -1467,6 +1587,10 @@ def main(argv=None):
                             if bundle.get('rebuild_note'):
                                 lines += ['  - 重建说明：' + bundle['rebuild_note']]
                         lines += ['- ' + error for error in result['report_consistency']['errors']]
+                        lines += ['', '## 自动化新增范围', '', '```json',
+                                  json.dumps(result['automation_expansion'], ensure_ascii=False, indent=2), '```']
+                        lines += ['', '## 收尾全量目标集合', '', '```json',
+                                  json.dumps(result['regression_completeness'], ensure_ascii=False, indent=2), '```']
                         lines += failure_markdown(state, cov, project)
                         lines += ['', '## Counts', '', '```json', json.dumps(result['counts'], indent=2), '```', '', '## Timing and Usage', '', '```json', json.dumps({'timing': result['timing'], 'usage': result['usage']}, indent=2), '```', '', '## Cases', '']
                         lines += ['| Case | Result | Code Coverage | Plan | Exploration | Code |', '| --- | --- | --- | --- | --- | --- |']

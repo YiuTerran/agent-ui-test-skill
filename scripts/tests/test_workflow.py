@@ -90,6 +90,11 @@ class WorkflowTest(unittest.TestCase):
     def report(self):
         return self.cli('report', '--run', self.run, '--owner', self.owner)
 
+    def mark_legacy_run(self):
+        state = self.state()
+        state['native_merge_required'] = False
+        self.write(f'test/.cache/runs/{self.run}/state.json', state)
+
     def test_fresh_start_requires_current_checks_and_refuses_overwrite(self):
         result = self.start()
         self.assertEqual(['source_check_required'], result['blocked_cases']['C1'])
@@ -110,8 +115,9 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual([], cov['cases'] if isinstance(cov['cases'], list) else list(cov['cases']))
             self.assertIn('package.json', result['discovered_commands'])
 
-    def test_unchanged_covered_direct_regression(self):
+    def test_legacy_unchanged_covered_direct_regression(self):
         self.start()
+        self.mark_legacy_run()
         result = self.check_sources()
         self.assertEqual(['C1', 'C2'], result['regression_ready'])
         self.assertEqual([], result['work_needed'])
@@ -290,6 +296,7 @@ class WorkflowTest(unittest.TestCase):
 
     def test_uncertain_create_requires_reconcile_and_exact_record_id(self):
         self.start()
+        self.mark_legacy_run()
         self.check_sources()
         intent = {'type': 'resource', 'resource_id': 'intent-1', 'status': 'intent', 'kind': 'record', 'created_by_run': self.run}
         self.record(intent)
@@ -471,6 +478,9 @@ class WorkflowTest(unittest.TestCase):
     def test_actions_are_classified_separately_and_deduplicated_per_case(self):
         self.start()
         self.check_sources()
+        self.record({'type': 'automation_expansion', 'owner': self.owner, 'mode': 'all',
+                     'scopes': ['a', 'b'], 'gap_case_ids': ['C1'],
+                     'user_reply': 'Add the listed synthetic case.', 'evidence': ['test/evidence.txt']})
         self.record([{'type': 'case', 'case_id': 'C1', 'action': 'added', 'exploration': 'complete',
                       'exploration_action': 'executed', 'code': 'complete', 'code_action': 'added'},
                      {'type': 'case', 'case_id': 'C1', 'action': 'updated', 'exploration': 'complete',
@@ -525,6 +535,7 @@ class WorkflowTest(unittest.TestCase):
         cov['cases']['C1']['execution'] = 'manual'
         self.write('test/plans/coverage.json', cov)
         self.start()
+        self.mark_legacy_run()
         self.check_sources()
         self.record({'type': 'task', 'task_id': 'manual-disposition', 'owner': self.owner, 'phase': 'case_review',
                      'status': 'approved', 'case_ids': ['C1'], 'dispositions': {'C1': {'mode': 'manual', 'status': 'approved', 'acceptance_version': '1', 'reason': 'Synthetic reviewed manual run', 'evidence': ['test/evidence.txt']}}})
