@@ -605,6 +605,54 @@ class SchedulingTest(unittest.TestCase):
         lock.assert_called_once()
         self.assertIs(type(lock.call_args.args[0]), int)
 
+    def test_ledger_initialization_does_not_resolve_missing_directories(self):
+        resolve = Path.resolve
+        def resolve_existing(path, strict=False):
+            if not path.exists():
+                raise AssertionError('missing directories can change during Windows resolution')
+            return resolve(path, strict=strict)
+        with patch.object(Path, 'resolve', resolve_existing):
+            self.assertEqual(4, self.budget()['available']['browsers'])
+        self.assertTrue((self.project / 'test/.cache/scheduling/quota.lock').is_file())
+
+    def test_ledger_rejects_escaping_directory_before_creating_children(self):
+        with tempfile.TemporaryDirectory(prefix='scheduling-outside-') as temporary:
+            outside = Path(temporary).resolve()
+            for component in ('test', 'test/.cache', 'test/.cache/scheduling'):
+                with self.subTest(component=component):
+                    link = self.project / component
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    junction = os.name == 'nt'
+                    if junction:
+                        result = subprocess.run(
+                            ['cmd', '/c', 'mklink', '/J', str(link), str(outside)],
+                            capture_output=True, timeout=10)
+                        self.assertEqual(0, result.returncode, result.stderr)
+                    else:
+                        link.symlink_to(outside, target_is_directory=True)
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'scheduling directory escapes project'):
+                            self.budget()
+                        self.assertEqual([], list(outside.iterdir()))
+                    finally:
+                        link.rmdir() if junction else link.unlink()
+
+    @unittest.skipUnless(os.name == 'nt', 'requires Windows final-path resolution')
+    def test_ledger_initialization_survives_parent_creation_during_resolution(self):
+        import ntpath
+        directory = self.project / 'test/.cache/scheduling'
+        getfinalpathname = ntpath._getfinalpathname
+        def create_parent_after_missing(path):
+            try:
+                return getfinalpathname(path)
+            except FileNotFoundError:
+                if Path(path) == directory:
+                    directory.parent.mkdir(parents=True, exist_ok=True)
+                raise
+        with patch.object(ntpath, '_getfinalpathname', create_parent_after_missing):
+            self.assertEqual(4, self.budget()['available']['browsers'])
+        self.assertTrue((directory / 'quota.lock').is_file())
+
     def test_counts_are_reservations_and_memory_is_explicitly_estimated(self):
         result = self.acquire()['budget']['quota']
         self.assertEqual('observed_reservations_not_running_processes', result['count_basis'])

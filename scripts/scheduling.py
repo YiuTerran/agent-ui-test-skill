@@ -466,9 +466,14 @@ def atomic_json(path, value):
 
 @contextmanager
 def locked_ledger(project):
-    directory = project / 'test/.cache/scheduling'
-    check(directory.resolve().is_relative_to(project), 'scheduling directory escapes project')
-    directory.mkdir(parents=True, exist_ok=True)
+    directory = project
+    for name in ('test', '.cache', 'scheduling'):
+        directory = directory / name
+        directory.mkdir(exist_ok=True)
+        # Resolving missing Windows paths can retain \\?\ when another process
+        # creates a parent mid-resolution. Check each existing component instead.
+        check(directory.resolve(strict=True).is_relative_to(project),
+              'scheduling directory escapes project')
     # Keep the lock inode stable; only the separate JSON file is replaced.
     with (directory / 'quota.lock').open('a') as stream:
         with platform_support.file_lock(stream.fileno()):
