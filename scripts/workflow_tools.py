@@ -86,6 +86,7 @@ def discovery_diff(wf, project, state, spec, cov, request):
               'ambiguous_tests': [], 'matched_cases': [], 'setup_targets': 0,
               'business_target_count': None,
               'legacy_shared_tests': [],
+              'code_roots_suggested': [], 'code_references_outside_snapshot': [], 'code_import_warnings': [],
               'requirement_mapping_errors': wf.asset_errors(project, spec, cov),
               'independent_test_execution_proved': False}
     if discovery is None:
@@ -140,6 +141,9 @@ def discovery_diff(wf, project, state, spec, cov, request):
                                        and not case.get('legacy_group') and cid not in matched),
                   evidence=discovery['path'], evidence_sha256=wf.hashlib.sha256(path.read_bytes()).hexdigest())
     result['reviewed_missing_tests'] = [cid for cid in result['missing_tests'] if not reasons[cid]]
+    roots = request.get('code_roots', [])
+    string_array(wf, roots, 'code_roots')
+    result.update(wf.report_artifacts.code_import_hints(project, raw, roots))
     return result
 
 
@@ -281,6 +285,7 @@ def attempt_init(wf, project, args):
             string_array(wf, roots, 'code_roots')
             plan['code_snapshot'] = wf.report_artifacts.discovered_code_snapshot(
                 project, wf.load(path), plan['setup_projects'], roots)
+            plan['code_scope_review'] = wf.report_artifacts.code_import_hints(project, wf.load(path), roots)
         plan['shard'] = wf.report_artifacts.command_shard(plan['command'])
         plan.update(bundle_id=args.bundle, run_id=state['run_id'], schema_version=2,
                     planned_at=wf.now(),
@@ -300,6 +305,7 @@ def attempt_init(wf, project, args):
             if staged.exists():
                 shutil.rmtree(staged)
         return {'created': True, 'plan': relative + '/plan.json',
+                **plan.get('code_scope_review', {}),
                 'environment': {'PLAYWRIGHT_JSON_OUTPUT_FILE': str(directory / 'results/result.json'),
                                 'PLAYWRIGHT_HTML_OUTPUT_DIR': str(directory / 'report/playwright'),
                                 'PLAYWRIGHT_BLOB_OUTPUT_DIR': str(directory / 'blob'),

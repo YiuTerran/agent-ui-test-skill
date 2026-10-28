@@ -1641,7 +1641,7 @@ def main(argv=None):
                                   '以下调用仅计入CLI墙钟，不计测试结果或全量完整性；资源状态另行核实。', '']
                         for bid, attempt in result['interrupted_attempts'].items():
                             lines += ['- ' + bid + ': ' + attempt['started_at'] + ' → ' + attempt['ended_at']
-                                      + '; exit=' + str(attempt['exit_code']) + '; ' + attempt['reason']
+                                      + '; exit=' + str('unknown' if attempt['exit_code'] is None else attempt['exit_code']) + '; ' + attempt['reason']
                                       + '；[命令回执](<' + str(safe_path(project, attempt['command_receipt'])) + '>)']
                         lines += failure_markdown(state, cov, project, recycled_paths)
                         lines += ['', '## Counts', '', '```json', json.dumps(result['counts'], indent=2), '```', '', '## Timing and Usage', '',

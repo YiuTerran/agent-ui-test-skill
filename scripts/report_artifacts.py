@@ -245,18 +245,25 @@ def code_path(project, value):
     return path
 
 
-def code_snapshot(project, specs, roots):
-    """Hash discovered specs and full fixture/extra trees, including their file sets."""
+CODE_EXCLUDED_DIRS = {'node_modules', '.cache', '__pycache__'}
+
+
+def code_snapshot(project, specs, roots, config_files=()):
+    """Hash code trees and their file sets without dependency/generated caches."""
     def unreadable(error):
         raise error
 
-    files = set(specs)
+    files = set(specs) | set(config_files)
     for relative in roots:
         directory = code_path(project, relative)
         if not directory.exists():
             continue
+        if directory.is_file():
+            files.add(relative)
+            continue
         check(directory.is_dir(), 'code snapshot root must be a directory: ' + relative)
         for parent, dirs, names in os.walk(directory, followlinks=False, onerror=unreadable):
+            dirs[:] = [name for name in dirs if name not in CODE_EXCLUDED_DIRS]
             for name in dirs + names:
                 path = Path(parent, name)
                 value = path.relative_to(project.resolve()).as_posix()
@@ -268,24 +275,42 @@ def code_snapshot(project, specs, roots):
         path = code_path(project, value)
         check(path.is_file() and stat.S_ISREG(path.stat().st_mode), 'code snapshot file missing or nonregular: ' + value)
         hashes[value] = hashlib.sha256(path.read_bytes()).hexdigest()
-    snapshot = {'specs': sorted(set(specs)), 'roots': sorted(set(roots)), 'files': hashes}
+    snapshot = {'schema_version': 2, 'specs': sorted(set(specs)), 'roots': sorted(set(roots)),
+                'config_files': sorted(set(config_files)), 'files': hashes}
     snapshot['sha256'] = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
     return snapshot
 
 
-def discovered_code_snapshot(project, raw, setup_projects, extra_roots=()):
-    root = Path(raw.get('config', {}).get('rootDir') or project)
-    root = (root if root.is_absolute() else project / root).resolve()
+def project_code_path(project, value):
+    """Normalize host aliases such as /var without hiding symlinks inside the project."""
+    path = Path(os.path.abspath(value))
+    if path.is_relative_to(project):
+        return path
+    for ancestor in (path, *path.parents):
+        if ancestor.resolve() == project:
+            return project / path.relative_to(ancestor)
+    return path
+
+
+def discovered_code_scope(project, raw, extra_roots=()):
+    project = project.resolve()
+    config = raw.get('config', {})
+    root = Path(config.get('rootDir') or project)
+    root = project_code_path(project, root if root.is_absolute() else project / root)
     check(root.is_relative_to(project.resolve()), 'code snapshot root outside project')
+    if root != project:
+        code_path(project, root.relative_to(project).as_posix())
     specs = set()
     for spec, _ in json_tests(raw):
         file = Path(spec['file'].replace('\\', '/'))
-        file = file if file.is_absolute() else root / file
+        file = project_code_path(project, file if file.is_absolute() else root / file)
         check(file.is_relative_to(project.resolve()), 'code snapshot spec outside project')
         value = file.relative_to(project.resolve()).as_posix()
         code_path(project, value)
         specs.add(value)
     roots = {value for value in extra_roots}
+    if root != project:
+        roots.add(root.relative_to(project).as_posix())
     roots.add((root / 'fixtures').relative_to(project.resolve()).as_posix())
     # Include conventional fixture trees on each discovered spec's parent chain.
     for value in specs:
@@ -293,14 +318,83 @@ def discovered_code_snapshot(project, raw, setup_projects, extra_roots=()):
         while parent != Path('.'):
             roots.add((parent / 'fixtures').as_posix())
             parent = parent.parent
-    return code_snapshot(project, specs, roots)
+    configs = set()
+    if config.get('configFile'):
+        file = Path(config['configFile'].replace('\\', '/'))
+        file = project_code_path(project, file if file.is_absolute() else project / file)
+        check(file.is_relative_to(project), 'Playwright config outside project')
+        configs.add(file.relative_to(project).as_posix())
+    # Legacy JSON can omit configFile; cover conventional configuration at the project root.
+    for suffix in ('ts', 'js', 'mts', 'cts', 'mjs', 'cjs'):
+        if (project / ('playwright.config.' + suffix)).is_file():
+            configs.add('playwright.config.' + suffix)
+    for value in specs | configs | roots:
+        code_path(project, value)
+    return specs, roots, configs
+
+
+def discovered_code_snapshot(project, raw, setup_projects, extra_roots=()):
+    specs, roots, configs = discovered_code_scope(project, raw, extra_roots)
+    return code_snapshot(project, specs, roots, configs)
+
+
+def code_import_hints(project, raw, extra_roots=()):
+    """Best-effort literal relative-import traversal, not a TS/JS module resolver."""
+    project = project.resolve()
+    specs, roots, configs = discovered_code_scope(project, raw, extra_roots)
+    pending, visited, suggestions, references, warnings = list(specs | configs), set(), set(), [], []
+    pattern = re.compile(r'''(?:\b(?:import|export)\s+(?:[^;'"]*?\bfrom\s*)?|\b(?:import|require)\s*\(\s*)['"](\.[^'"\r\n]+)['"]''')
+    suffixes = ('.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.json')
+
+    def covered(value):
+        return value in specs | configs or (not set(Path(value).parts) & CODE_EXCLUDED_DIRS
+                                           and any(Path(value).is_relative_to(Path(root)) for root in roots))
+
+    while pending:
+        value = pending.pop()
+        if value in visited:
+            continue
+        visited.add(value)
+        path = code_path(project, value)
+        if path.suffix not in suffixes or not path.is_file():
+            continue
+        text = path.read_text(encoding='utf-8')
+        text = re.sub(r'/\*.*?\*/|^\s*//[^\n]*', '', text, flags=re.S | re.M)
+        for match in pattern.finditer(text):
+            target = Path(os.path.abspath(path.parent / match.group(1)))
+            if not target.is_relative_to(project):
+                warnings.append({'importer': value, 'reason': 'relative_import_outside_project'})
+                continue
+            candidates = [target]
+            if target.suffix in {'.js', '.jsx', '.mjs', '.cjs'}:
+                candidates += [target.with_suffix(s) for s in ('.ts', '.tsx', '.mts', '.cts')]
+            if not target.suffix:
+                candidates += [Path(str(target) + s) for s in suffixes]
+            candidates += [target / ('index' + s) for s in suffixes]
+            resolved = next((p for p in candidates if p.is_file()), None)
+            if resolved is None:
+                warnings.append({'importer': value, 'reason': 'relative_import_unresolved', 'import': match.group(1)})
+                continue
+            relative = resolved.relative_to(project).as_posix()
+            code_path(project, relative)
+            if set(resolved.relative_to(project).parts) & CODE_EXCLUDED_DIRS:
+                warnings.append({'importer': value, 'reason': 'relative_import_in_excluded_directory', 'file': relative})
+                continue
+            if not covered(relative):
+                suggestions.add((resolved.parent if resolved.parent != project else resolved)
+                                .relative_to(project).as_posix())
+                references.append({'importer': value, 'file': relative})
+            pending.append(relative)
+    return {'code_roots_suggested': sorted(suggestions),
+            'code_references_outside_snapshot': sorted(references, key=lambda row: (row['importer'], row['file'])),
+            'code_import_warnings': warnings}
 
 
 def code_snapshot_difference(project, saved):
-    if not saved:
+    if not saved or saved.get('schema_version') != 2:
         return {'status': 'incomplete', 'reason': 'code_fingerprint_missing'}
     try:
-        current = code_snapshot(project, saved['specs'], saved['roots'])
+        current = code_snapshot(project, saved['specs'], saved['roots'], saved['config_files'])
         previous = saved['files']
         if current == saved:
             return {'status': 'checked', 'reason': None}
@@ -453,11 +547,17 @@ def inspect_interrupted_attempt(project, run_id, attempt):
     plan, receipt = files['attempt_plan'], files['command_receipt']
     check(plan['run_id'] == run_id and plan['bundle_id'] == bid, 'interrupted plan identity mismatch')
     for key in ('cwd', 'environment', 'scope', 'setup_projects', 'command', 'started_at', 'ended_at', 'exit_code'):
-        check(attempt.get(key) == receipt.get(key), 'interrupted receipt mismatch: ' + key)
+        check(key in attempt and key in receipt and attempt[key] == receipt[key],
+              'interrupted receipt mismatch or missing field: ' + key)
         if key in ('cwd', 'environment', 'scope', 'setup_projects'):
             check(attempt[key] == plan[key], 'interrupted receipt differs from plan: ' + key)
-    check(type(receipt.get('exit_code')) is int and receipt['exit_code'] != 0,
-          'interrupted receipt requires an actual nonzero integer exit code')
+    exit_code = receipt['exit_code']
+    check(exit_code is None or (type(exit_code) is int and exit_code != 0),
+          'interrupted receipt requires a nonzero integer exit code or explicit null')
+    if exit_code is None:
+        check(isinstance(receipt.get('reason'), str) and receipt['reason'].strip()
+              and receipt['reason'] == attempt['reason'],
+              'unknown exit code requires a receipt reason explaining why it is unavailable; --reason must match')
     check(timestamp(plan['planned_at']) <= timestamp(receipt['started_at']) <= timestamp(receipt['ended_at']),
           'invalid interrupted invocation times')
     check_attempt_command(plan, receipt['command'], project / prefix)
@@ -734,7 +834,7 @@ def review_html(project, state, consistency):
             receipt = '命令回执缺失'
         interrupted.append('<li>' + escape(bid) + ' · ' + escape(attempt['reason']) + ' · '
                            + escape(attempt['started_at']) + ' → ' + escape(attempt['ended_at'])
-                           + ' · exit=' + escape(attempt['exit_code']) + ' · ' + receipt + '</li>')
+                           + ' · exit=' + escape('unknown' if attempt['exit_code'] is None else attempt['exit_code']) + ' · ' + receipt + '</li>')
     return '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>E2E review</title><style>

@@ -94,12 +94,14 @@ python3 "$WF" attempt-init --project "$PROJECT" --run "$RUN" --owner "$OWNER" --
 
 先在同级临时目录准备plan.json和全部子目录，再整体rename发布到`attempts/cli-01`；写入或发布失败只清理本次临时目录，同一个bundle ID可重试。进程被直接终止而遗留的点开头临时目录由retention保留并跳过，不作为bundle回收。返回JSON/HTML/blob环境变量及reporter/output参数数组，其中输出目录是当前执行主机的绝对路径。CI容器、挂载位置或cwd不同，应在实际执行文件系统中准备Attempt并应用对应路径。由执行者使用当前shell的安全引用方式应用，不把JSON数组直接拼成shell命令。沿用项目安装版本和密钥注入，领取真实配额后执行，teardown完成才释放
 
-实际CLI回执保存到该attempt的command.json，包含完整真实command数组、cwd、environment、scope、setup_projects、started_at、ended_at和整数exit_code。command必须等于计划command，或仅追加返回的reporter/output参数组；两组可分别省略或换序，每组至多一次，输出路径须完全匹配。`--grep`、`--project`、spec路径、`--shard`等执行选择参数必须在计划command中明确声明。起止时间带时区、在准备之后且不在未来，退出码由真实进程观察提供，失败也保留回执和全部产物
+实际CLI回执保存到该attempt的command.json，包含完整真实command数组、cwd、environment、scope、setup_projects、started_at、ended_at和整数exit_code；仅回执中断的未知退出码见下文。command必须等于计划command，或仅追加返回的reporter/output参数组；两组可分别省略或换序，每组至多一次，输出路径须完全匹配。`--grep`、`--project`、spec路径、`--shard`等执行选择参数必须在计划command中明确声明。起止时间带时区、在准备之后且不在未来，退出码由真实进程观察提供，失败也保留回执和全部产物
 
 regression_mode与收尾完整性：
 
 - affected为缺省的受影响验证；收尾全量明确填full，绑定当前preflight的完整发现清单、范围和输入指纹，要求非空业务目标且不存在已审核独立test缺席
-- full计划保存发现清单内全部spec（含Setup）及其父链中fixtures目录的文件集合与SHA-256；目录增删文件也参与比对。非惯例fixture/helper目录通过可选code_roots字符串数组显式纳入。验收与报告重算当前内容，变化标为code_changed_after_full并判incomplete；旧计划缺指纹标为code_fingerprint_missing，原始执行回执仍保留
+- full计划保存全部发现spec（含Setup）、发现JSON的config.configFile及项目根playwright.config.*的SHA-256。config.rootDir小于项目根时默认纳入整棵测试目录树；等于项目根时仅纳入spec、配置及spec父链的fixtures目录。目录遍历排除node_modules、.cache、__pycache__，文件增删也参与比对。可选code_roots字符串数组扩展项目内文件或目录；路径均校验符号链接和越界
+- preflight的coverage_diff及full的attempt-init输出code_roots_suggested、code_references_outside_snapshot和code_import_warnings。递归扫描spec与配置的字面量相对import/export/require，提示范围外依赖、未解析引用和项目外引用；提示不自动扩展指纹或阻断执行。审阅后将需要的code_roots传入full计划。此扫描不是模块解析器，不覆盖别名或动态计算路径
+- 验收与报告重算当前内容，变化标为code_changed_after_full并判incomplete；旧版窄范围指纹或缺指纹标为code_fingerprint_missing，需要新full证明当前代码，原始执行回执仍保留
 - 采集预期与实际的(file,title,project)多重集合，比较缺失/多余目标、Setup和shard。skipped/notrun保留在目标集合中；集合齐全与业务通过分别记录，差集写入summary、Markdown及HTML
 - native_merge_required=true的run每个bundle必须绑定当前schema的Attempt计划。fully_accepted要求regression_completeness=complete，即使所有直接execution都通过也适用；未登记bundle、仅affected或缺目标/分片时均为incomplete，保留证据并阻止完整验收
 - not_declared仅用于native_merge_required缺省或false的旧run未声明用途的兼容记录。完整性相对于执行者提供的发现清单，仍须审阅真实发现命令及配置
@@ -120,7 +122,7 @@ attempt-init拒绝覆盖已有attempt、越界scope、异常路径和符号链�
 python3 "$WF" attempt-interrupted --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle cli-01 --reason "<实际中断原因>"
 ```
 
-要求非零整数退出码、有效起止时间、计划/命令一致及文件摘要；--input可指定本attempt内的其他真实回执。完整产物继续走attempt-bundle/collect-results。interrupted_attempt单列于state、HTML、Markdown和timing，仅计CLI墙钟，测试时长保持null，不进入业务结果、full完整性或原生merge输入。计划和命令回执持续保留，资源恢复及配额释放仍依据实际状态；未观察到进程退出时先保留issue及现有证据，不造结束时间或退出码
+要求非零整数退出码，或显式exit_code:null；后者用于已确认进程结束但宿主会话结束、外部终止等导致拿不到退出状态的情况，command.json须带reason解释原因，且与--reason一致。起止时间仍需真实有效、计划/命令及文件摘要一致；--input可指定本attempt内的其他真实回执。完整产物继续走attempt-bundle/collect-results。interrupted_attempt单列于state、HTML、Markdown和timing，仅计CLI墙钟，测试时长保持null，不进入业务结果、full完整性或原生merge输入。未知退出码在机器数据保留null、可读报告显示unknown。计划和命令回执持续保留，资源恢复及配额释放仍依据实际状态；未观察到进程退出时先保留issue及现有证据，不造结束时间或退出码
 
 ## 只读耗时汇总
 

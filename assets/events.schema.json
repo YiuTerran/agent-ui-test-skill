@@ -532,7 +532,8 @@
               "const": "interrupted"
             },
             "exit_code": {
-              "type": "integer",
+              "type": ["integer", "null"],
+              "description": "Actual nonzero exit code, or explicit null when unavailable. For null the command receipt must contain the same reason explaining why the exit code could not be observed.",
               "not": {
                 "const": 0
               }

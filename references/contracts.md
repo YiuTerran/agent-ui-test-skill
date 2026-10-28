@@ -174,7 +174,7 @@ usage仅唯一根项明确coverage=complete_run且有coverage_description说明�
 | 事件 | 必填字段 | 条件/可选字段与值 | 门禁 |
 | --- | --- | --- | --- |
 | `report_bundle` | bundle对象 | 完整字段表与示例见[报告绑定](reports.md#绑定与校验)；bundle_id在run内唯一、scope属于本run | 文件位于本次attempt；登记保存SHA-256，后续逐slot绑定；兼容旧回执不等于新执行可不绑定 |
-| `interrupted_attempt` | attempt对象 | attempt-interrupted从真实plan/命令回执生成，字段形状用schema --type interrupted_attempt查看 | 非零退出码、实际时间、计划/命令及摘要一致；独立ID，仅纳入报告与CLI计时，不含测试结果 |
+| `interrupted_attempt` | attempt对象 | attempt-interrupted从真实plan/命令回执生成，字段形状用schema --type interrupted_attempt查看 | 非零退出码或显式null并在回执reason说明未知原因（与--reason一致）；实际时间、计划/命令及摘要一致；独立ID，仅纳入报告与CLI计时，不含测试结果 |
 | `merged_report` | report.html_report、bundle_ids、command、started_at、ended_at、exit_code | 主owner登记实际离线merge，exit_code=0；输入为所有bundle的blob_reports | bundle_ids恰好覆盖本轮全部结果bundle；比较原始JSON全部尝试与合并HTML/附件，保存输入ZIP及输出摘要；新增CLI须重新合并 |
 | `acceptance` | status、owner | status=`in_progress/blocked/partially_accepted/fully_accepted/completed_with_failures/partially_blocked/aborted`；reason、evidence可选 | owner必须主owner；终态为fully_accepted/completed_with_failures/partially_blocked/aborted；资源残留阻止fully_accepted |
 
