@@ -2,6 +2,8 @@
 
 在准备真实E2E CLI、登记执行回执和验收报告时读取。本文件补充[contracts.md](contracts.md)中的机器契约。仅本地修复按[快车道](workflow.md#按报告修复快车道)交付实际测试/构建结果与未执行项，不生成E2E run或套用本文件的Attempt、配额与合并步骤。
 
+指定case复测或只跑自动化先按[直接完成](workflow.md#确定性任务直接完成)执行；以下机器绑定契约适用于工作流管理的run。直接执行保留原生JSON/HTML/blob、真实命令回执及资源账本，单次原生HTML可交付。工作流登记和最新需求验收状态分别说明，不为补登记而扩大范围、修改执行中的输入或重复业务测试。
+
 ## 每次命令独立保存
 
 run可以包含多次CLI执行。每次分配新的`bundle_id`，重跑、认证重试及不同subset均保留独立目录：
@@ -135,7 +137,7 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 
 每轮最终交付一个`report.html`入口，收纳本轮全部CLI，包含Setup、业务、retry、重复执行及未执行目标。顺序为失败→非预期/重跑后通过→跳过/未执行→普通通过；保留每次原始尝试及其批次，不能用最终pass隐藏首次失败。入口直接链接合并的Playwright原生HTML，并保留各次HTML、原始JSON及错误详情入口；未绑定的原始失败也显示，并标明报告一致性限制。
 
-原生合并由主Agent执行本地项目同版本Playwright，属于离线产物处理，不重跑测试：
+原生合并由主Agent或获派的低思考等级runner执行本地项目同版本Playwright，属于离线产物处理，不重跑测试：
 
 1. 将本轮所有已登记`blob_reports`复制到独立合并输入目录，用bundleID前缀避免同名覆盖，核对数量和SHA-256；不混入历史run。本轮失败CLI也纳入，新run缺blob必须阻塞，不以“限制”替代门禁
 2. 运行项目包管理器对应的`playwright merge-reports --reporter=html <input-dir>`，将`PLAYWRIGHT_HTML_OUTPUT_DIR`设为`test/.cache/runs/<run-id>/merged/playwright`，`PLAYWRIGHT_HTML_OPEN=never`。PowerShell使用环境变量赋值或显式merge配置。保持安装版本和testDir一致，不在线升级依赖

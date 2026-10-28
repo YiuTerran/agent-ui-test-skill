@@ -62,7 +62,7 @@ work_needed_reasons可直接定位review_not_approved、implementation_not_valid
 | `schema_version`、`scope` | 版本1；scope.fixed固定范围，modules记录模块，CLI只选子集 |
 | `source` | 数组`{id,scope,location}`，多模块用scopes数组；location为路径或来源标识 |
 | `env`、`authref`、`data-policy`、`commands` | 初始null/null/null/{}，须从真实环境、授权和项目命令确认 |
-| `concurrency` | max_parallel_agents=auto，auto_parallel_cap/browser_parallel_cap/playwright_workers均4；预算不等于授权 |
+| `concurrency` | max_parallel_agents=auto，auto_parallel_cap/browser_parallel_cap/playwright_workers均4；默认Agent总数含主Agent，主Agent按近期整机CPU/内存采样调整；两项均低于80%才扩容，预算不等于授权 |
 | `wait` | timeout_seconds=300，poll_seconds=15 |
 | `regression`、`retention` | final=all_existing_automation；before_regression=true、reports=summary_and_unresolved_evidence。旧配置缺项按默认读，显式选择不重写 |
 
@@ -227,6 +227,8 @@ report返回summary、report_bundles、可选merged_report、report_consistency�
  "conflict_keys":["shared-record:fixture-a"],"case_ids":["C1"],"isolation":"verified",
  "quota":{"agents":1,"exploration_browsers":1,"playwright_workers":0}}}}
 ```
+
+默认总共4个Agent（主Agent+最多3个子Agent），主Agent在宿主槽位和实际Agent计数中也占1个名额；不得把调度账本仅登记的子Agent数当作全部Agent。4是起始值而非固定上限；有独立任务且宿主有槽位时可增加至5个及以上。主Agent依据近期整机CPU和内存使用率，使用concurrency覆盖值逐步调整并发；两项均低于80%才扩容，任一达到阈值时用`resources.pressure=true`暂停新配额，已有任务正常清理后释放。缺少可靠使用率采样时不扩容；CPU核数和可用内存字节不等于使用率。百分比采样由宿主取得并由主Agent检查，当前脚本不自动测量或持续控制整机使用率，不传入未支持的百分比字段。Agent扩容不自动提高浏览器配额。
 
 预算返回requested/effective/available、限制/事实来源及登记峰值。每浏览器约2GiB+2GiB余量是估计；未知CPU或内存只允许1个总浏览器，pressure=true暂停新增、不撤现租约；显式配置仍受已知资源约束。macOS有界vm_stat、Windows GetProcessAffinityMask/GlobalMemoryStatusEx只作探测，不冒充进程/内存实测峰值。
 
