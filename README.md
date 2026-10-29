@@ -37,6 +37,9 @@ git clone https://github.com/YiuTerran/agent-ui-test-skill.git \
 其他支持目录式 `SKILL.md` 的 Agent 使用其对应的技能目录；浏览器工具和授权机制仍须在该环境实际验证。
 也可以保留当前 checkout，通过绝对路径引用其中的 `SKILL.md`，避免维护两份源码。
 
+如果当前 Agent 支持安装技能，也可以直接告诉它：**“请从 `https://github.com/YiuTerran/agent-ui-test-skill` 安装 `ego-lite-playwright-e2e`。”**
+安装后可继续询问“这个 skill 怎么用？”，或让 Agent 在目标前端工程目录按首次接入引导开始配置。
+
 调用示例：
 
 ```text
