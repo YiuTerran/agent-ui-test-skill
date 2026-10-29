@@ -35,6 +35,14 @@ DONE = {'approved', 'complete'}
 RESULTS = {'pass', 'fail', 'skip', 'notrun'}
 CASE_ACTIONS = {'added', 'updated', 'retired', 'unchanged', 'needs_decision'}
 SECRET_KEYS = {'password', 'passwd', 'secret', 'token', 'access_token', 'refresh_token', 'cookie', 'authorization', 'api_key'}
+SHARED_CONFIG = 'shared_config'
+RESOURCE_STATES = {'intent', 'confirmed', 'ambiguous', 'absence_verified', 'retained_verified'}
+# Closed resources are not residuals: deleted, or kept in a verified pooled/disabled state.
+RESOLVED_RESOURCES = {'absence_verified', 'retained_verified'}
+RETENTION_MODES = {'pooled', 'disabled'}
+UNRESOLVED_RESOURCES = {'intent', 'confirmed', 'ambiguous'}
+POOL_LEDGER = 'test/.cache/identity-pools.json'
+POOL_STATES = ('available', 'leased', 'quarantined', 'disabled')
 
 
 def now():
@@ -302,12 +310,18 @@ def run_path(project, run_id):
     return project / 'test/.cache/runs' / run_id
 
 
-def owner_check(state, owner):
+def active_claim_check(state):
     claim = state.get('claim')
-    check(claim and owner and claim['owner'] == owner, 'run is owned by another task or released')
+    check(claim, 'run is released')
     lease = max(platform_support.MIN_RUN_LEASE_SECONDS,
                 claim.get('lease_seconds', platform_support.MIN_RUN_LEASE_SECONDS))
     check((dt(now()) - dt(claim['renewed_at'])).total_seconds() < lease, 'claim expired; use start --reclaim --reason')
+
+
+def owner_check(state, owner):
+    claim = state.get('claim')
+    check(claim and owner and claim['owner'] == owner, 'run is owned by another task or released')
+    active_claim_check(state)
 
 
 def renew(project, state, spec, cov, owner, full=True):
@@ -387,6 +401,115 @@ def disposition_approved(state, cid, case):
     return False
 
 
+def residual_action(resource):
+    return 'restore' if resource.get('kind') == SHARED_CONFIG else 'cleanup'
+
+
+def pool_ledger(project):
+    path = safe_path(project, POOL_LEDGER)
+    if not path.exists():
+        return {'schema_version': 1, 'pools': {}}
+    ledger = load(path)
+    check(isinstance(ledger, dict) and ledger.get('schema_version') == 1 and isinstance(ledger.get('pools'), dict),
+          'invalid identity pool ledger: ' + POOL_LEDGER)
+    return ledger
+
+
+def pool_config(spec, name):
+    pools = spec.get('identity_pools') or {}
+    check(isinstance(pools, dict), 'identity_pools must be an object')
+    value = pools.get(name)
+    check(isinstance(name, str) and bool(re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name)) and isinstance(value, dict)
+          and type(value.get('max_accounts')) is int and value['max_accounts'] > 0,
+          'identity pool needs identity_pools.<name>.max_accounts > 0 in spec: ' + str(name))
+    return value
+
+
+def pool_resources(project, state, current_only=False):
+    """Latest pooled resource records, optionally restricted to the current run."""
+    latest = {}
+    others = []
+    paths = () if current_only else (project / 'test/.cache/runs').glob('*/state.json')
+    for path in paths:
+        if path.parent.name != state['run_id']:
+            try:
+                others.append(load(path))
+            except (ValueError, OSError):
+                raise ValueError('unreadable run state prevents identity pool accounting: '
+                                 + path.relative_to(project).as_posix()) from None
+    for other in others + [state]:
+        for rid, resource in other['resources'].items():
+            if resource.get('pool'):
+                key = (resource.get('created_by_run', other['run_id']), resource.get('origin_resource_id', rid))
+                if key not in latest or resource.get('at', '') >= latest[key].get('at', ''):
+                    latest[key] = resource
+    return latest
+
+
+def pool_occupancy(project, state, name):
+    """Accounts count toward max_accounts until deleted, including disabled and quarantined ones."""
+    accounts = pool_ledger(project)['pools'].get(name, {}).get('accounts', {})
+    registered = {tuple(account['origin']) for account in accounts.values()}
+    pending = sum(1 for key, resource in pool_resources(project, state).items()
+                  if resource['pool'] == name and key not in registered
+                  and resource['status'] in UNRESOLVED_RESOURCES | {'retained_verified'})
+    return len(accounts) + pending
+
+
+def sync_pool_ledger(project, state, current_only=False):
+    """Idempotently register retained pooled/disabled accounts; safe to rerun after a crash."""
+    ledger = pool_ledger(project)
+    changed = False
+    for key, resource in sorted(pool_resources(project, state, current_only=current_only).items()):
+        if resource['status'] != 'retained_verified':
+            continue
+        accounts = ledger['pools'].setdefault(resource['pool'], {'accounts': {}})['accounts']
+        if resource['pool_ref'] in accounts:
+            continue
+        accounts[resource['pool_ref']] = {
+            'pool_ref': resource['pool_ref'], 'status': 'available' if resource['retention'] == 'pooled' else 'disabled',
+            'origin': list(key), 'baseline_evidence': resource.get('evidence', []), 'updated_at': now(),
+            'history': [{'at': now(), 'action': 'registered', 'retention': resource['retention']}]}
+        changed = True
+    if changed:
+        atomic(safe_path(project, POOL_LEDGER), ledger)
+    return ledger
+
+
+def sync_recorded_pools(project, state, events):
+    """Register only when this batch retained an account; state is not committed yet."""
+    if any(event.get('type') == 'resource' and event.get('status') == 'retained_verified'
+           and state['resources'].get(event.get('resource_id'), {}).get('pool') for event in events):
+        sync_pool_ledger(project, state, current_only=True)
+
+
+def pool_run_accounts(project, run_id):
+    found = {'leased': [], 'quarantined': []}
+    for name, pool in pool_ledger(project)['pools'].items():
+        for ref, account in sorted(pool.get('accounts', {}).items()):
+            if account['status'] == 'leased' and account.get('leased_by_run') == run_id:
+                found['leased'].append(name + '/' + ref)
+            if account['status'] == 'quarantined' and account.get('quarantine', {}).get('run_id') == run_id:
+                found['quarantined'].append(name + '/' + ref)
+    return found
+
+
+def pool_view(project, state, spec):
+    configured = spec.get('identity_pools') if isinstance(spec.get('identity_pools'), dict) else {}
+    pools = pool_ledger(project)['pools']
+    view = {}
+    for name in sorted(set(configured) | set(pools)):
+        accounts = pools.get(name, {}).get('accounts', {})
+        limit = configured.get(name, {}).get('max_accounts') if isinstance(configured.get(name), dict) else None
+        view[name] = dict({s: sum(a['status'] == s for a in accounts.values()) for s in POOL_STATES},
+                          max_accounts=limit,
+                          leased_by_this_run=sorted(r for r, a in accounts.items()
+                                                    if a['status'] == 'leased' and a.get('leased_by_run') == state['run_id']),
+                          quarantined_accounts=[dict(a['quarantine'], pool_ref=r) for r, a in sorted(accounts.items())
+                                                if a['status'] == 'quarantined'])
+    return view
+
+
 def global_residuals(project, state):
     latest, unreadable = {}, []
     paths = (project / 'test/.cache/runs').glob('*/state.json')
@@ -407,9 +530,10 @@ def global_residuals(project, state):
     current = {(r.get('created_by_run', state['run_id']), r.get('origin_resource_id', rid)) for rid, r in state['resources'].items()}
     result = list(unreadable)
     for key, (run_id, resource) in sorted(latest.items()):
-        if key not in current and resource['status'] != 'absence_verified':
+        if key not in current and resource['status'] not in RESOLVED_RESOURCES:
             result.append({'run_id': run_id, 'resource_id': resource['resource_id'], 'record_id': resource.get('record_id'),
-                           'status': resource['status'], 'suggestion': 'owner_cleanup' if resource['status'] == 'confirmed' else 'owner_reconcile',
+                           'status': resource['status'], 'kind': resource.get('kind'),
+                           'suggestion': ('owner_' + residual_action(resource)) if resource['status'] == 'confirmed' else 'owner_reconcile',
                            'state_path': 'test/.cache/runs/' + run_id + '/state.json'})
     return result
 
@@ -464,9 +588,9 @@ def status(project, state, spec, cov, full=True, include_history=True):
     pending = {hid: human_view(h) for hid, h in state['humans'].items() if human_pending(h)}
     residual = []
     for rid, resource in state['resources'].items():
-        if resource['status'] != 'absence_verified':
-            suggestion = 'cleanup' if resource['status'] == 'confirmed' and resource.get('owned') and resource.get('receipt') else 'reconcile'
-            residual.append(dict({key: resource.get(key) for key in ['resource_id', 'status', 'created_by_run', 'origin_run', 'record_id', 'identifying_fields', 'receipt', 'owned']}, suggestion=suggestion))
+        if resource['status'] not in RESOLVED_RESOURCES:
+            suggestion = residual_action(resource) if resource['status'] == 'confirmed' and resource.get('owned') and resource.get('receipt') else 'reconcile'
+            residual.append(dict({key: resource.get(key) for key in ['resource_id', 'status', 'kind', 'config_key', 'created_by_run', 'origin_run', 'record_id', 'identifying_fields', 'receipt', 'owned']}, suggestion=suggestion))
     blocked, ready, work, dispositions, work_reasons = {}, [], [], {}, {}
     for cid, case in selected.items():
         sid = case.get('source_id')
@@ -495,6 +619,9 @@ def status(project, state, spec, cov, full=True, include_history=True):
         steps.append('resume_and_review_changed_configuration')
     if residual or global_resources:
         steps.append('reconcile_or_cleanup_recorded_resources')
+    pools = pool_view(project, state, spec)
+    if any(p['quarantined'] for p in pools.values()):
+        steps.append('resolve_quarantined_pool_accounts')
     if any(s['status'] == 'unknown' for s in checks.values()):
         steps.append('record_current_source_checks')
     if state.get('recovery_required'):
@@ -551,7 +678,7 @@ def status(project, state, spec, cov, full=True, include_history=True):
             'run_id': state['run_id'], 'freshness_marker': state['freshness_marker'], 'acceptance': state['acceptance'], 'claim': state.get('claim'),
             'source_checks': checks, 'residual_resources': residual, 'global_residual_runs': global_resources, 'pending_humans': pending,
             'blocked_cases': blocked, 'regression_ready': ready, 'work_needed': work, 'work_needed_reasons': work_reasons, 'nonautomated_cases': dispositions,
-            'automation_expansion': expansion,
+            'automation_expansion': expansion, 'identity_pools': pools,
             'requirements_updates_paused': [sid for sid, value in checks.items() if value['status'] in {'unknown', 'unavailable'}],
             'missing_configuration': missing, 'unmapped_requirements': unmapped, 'planning_needed_scopes': planning, 'next_steps': steps, 'usage_known': bool(state['usage']), 'coverage_asset_drift': state['asset_fingerprint'] != fingerprint(cov)}
 
@@ -576,6 +703,39 @@ def require_evidence(project, event, allow_recycled=False, recycled_paths=None):
         recycled_paths = retention.recycled_paths(project, missing) if allow_recycled and missing else set()
     for item in missing:
         check(allow_recycled and item in recycled_paths, 'evidence file missing: ' + item)
+
+
+def config_snapshot(project, value, name):
+    check(isinstance(value, str) and value.startswith('test/.cache/'), name + ' must be a JSON file under test/.cache/')
+    path = safe_path(project, value)
+    check(path.is_file(), name + ' missing: ' + value)
+    try:
+        return fingerprint(load(path))
+    except ValueError:
+        raise ValueError(name + ' must be valid JSON: ' + value) from None
+
+
+def shared_config_resource(project, prior, event, stored):
+    """A shared configuration change is closed only by a readback equal to the saved original."""
+    check(isinstance(stored.get('config_key'), str) and stored['config_key'],
+          'shared_config resource requires config_key')
+    check(not prior or stored['config_key'] == prior.get('config_key'), 'shared_config config_key cannot change')
+    if not prior:
+        check('original_sha256' not in event, 'original_sha256 is computed from original_snapshot')
+        stored['original_sha256'] = config_snapshot(project, event.get('original_snapshot'), 'original_snapshot')
+    else:
+        check(event.get('original_snapshot', prior['original_snapshot']) == prior['original_snapshot']
+              and event.get('original_sha256', prior['original_sha256']) == prior['original_sha256'],
+              'shared_config original snapshot cannot change')
+    if event['status'] == 'absence_verified':
+        check(config_snapshot(project, stored['original_snapshot'], 'original_snapshot') == stored['original_sha256'],
+              'original_snapshot changed after intent')
+        check(config_snapshot(project, event.get('restored_snapshot'), 'restored_snapshot') == stored['original_sha256'],
+              'restored readback differs from original; keep the resource confirmed and record an issue')
+    else:
+        check('restored_snapshot' not in event, 'restored_snapshot belongs to absence_verified only')
+    snapshots = [stored['original_snapshot']] + ([stored['restored_snapshot']] if stored.get('restored_snapshot') else [])
+    stored['evidence'] = sorted(set((prior or {}).get('evidence', []) + event.get('evidence', []) + snapshots))
 
 
 def record_event(project, state, spec, cov, event, context=None):
@@ -743,18 +903,52 @@ def record_event(project, state, spec, cov, event, context=None):
     elif kind == 'resource':
         rid, value = event['resource_id'], event['status']
         prior = state['resources'].get(rid)
-        check(value in {'intent', 'confirmed', 'ambiguous', 'absence_verified'}, 'invalid resource state')
+        check(value in RESOURCE_STATES, 'invalid resource state')
         check(prior is not None or value == 'intent', 'resource must record intent before create result')
         origin = prior.get('created_by_run') if prior and prior.get('origin_run') else state['run_id']
         check(event.get('created_by_run') == origin, 'resource must belong to this run or its explicitly inherited ledger')
         if prior:
-            allowed = {'intent': {'confirmed', 'ambiguous', 'absence_verified'}, 'ambiguous': {'confirmed', 'absence_verified'}, 'confirmed': {'absence_verified'}, 'absence_verified': set()}
+            allowed = {'intent': {'confirmed', 'ambiguous', 'absence_verified'}, 'ambiguous': {'confirmed', 'absence_verified'}, 'confirmed': {'absence_verified', 'retained_verified'},
+                       'absence_verified': set(), 'retained_verified': set()}
             check(value in allowed[prior['status']], 'invalid resource transition')
         if value == 'confirmed':
             check(event.get('owned') is True and bool(event.get('receipt')), 'confirmed resource requires ownership and creation receipt')
         if value == 'absence_verified':
             check(event.get('evidence'), 'absence verification requires evidence')
-        state['resources'][rid] = dict(prior or {}, **event)
+        if value == 'retained_verified':
+            check(event.get('retention') in RETENTION_MODES, 'retained resource requires retention=pooled or disabled')
+            check(event.get('evidence'), 'retained resource requires readback evidence')
+            pool = event.get('pool', (prior or {}).get('pool'))
+            check(event['retention'] != 'pooled' or pool, 'pooled resource requires a pool declared at intent')
+            check(not pool or (isinstance(event.get('pool_ref'), str)
+                               and bool(re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', event['pool_ref']))),
+                  'pool account requires pool_ref (account reference name, no credentials)')
+        else:
+            check('retention' not in event and 'pool_ref' not in event, 'retention fields belong to retained_verified only')
+        stored = dict(prior or {}, **event)
+        if prior:
+            check(stored.get('pool') == prior.get('pool'), 'resource pool is fixed at intent')
+        elif event.get('pool') is not None:
+            limit = pool_config(spec, event['pool'])['max_accounts']
+            used = pool_occupancy(project, state, event['pool'])
+            check(used < limit, 'identity pool ' + event['pool'] + ' is full: ' + str(used) + '/' + str(limit)
+                  + ' accounts including disabled and quarantined; reuse or resolve instead of creating')
+        if value == 'retained_verified' and stored.get('pool'):
+            origin_key = (stored.get('created_by_run'), stored.get('origin_resource_id', rid))
+            account = pool_ledger(project)['pools'].get(stored['pool'], {}).get('accounts', {}).get(stored['pool_ref'])
+            check(not account or tuple(account['origin']) == origin_key, 'pool_ref already belongs to another account')
+            check(not any(r.get('pool') == stored['pool'] and r.get('pool_ref') == stored['pool_ref'] and k != origin_key
+                          for k, r in pool_resources(project, state).items() if r['status'] == 'retained_verified'),
+                  'pool_ref already belongs to another account')
+        if prior:
+            # Ordinary intents may gain a kind; shared config needs its snapshot at intent.
+            prior_kind, current_kind = prior.get('kind'), stored.get('kind')
+            check(prior_kind == current_kind or (prior_kind is None and current_kind != SHARED_CONFIG),
+                  'resource kind cannot change')
+        if stored.get('kind') == SHARED_CONFIG:
+            check(value != 'retained_verified', 'shared_config closes only by restored readback')
+            shared_config_resource(project, prior, event, stored)
+        state['resources'][rid] = stored
     elif kind == 'human':
         hid = event['request_id']
         prior = state['humans'].get(hid)
@@ -900,6 +1094,9 @@ def record_event(project, state, spec, cov, event, context=None):
     elif kind == 'acceptance':
         check(event.get('owner') == state['claim']['owner'], 'acceptance must be recorded by main owner')
         check(event.get('status') in {'in_progress', 'blocked', 'partially_accepted', 'fully_accepted', 'completed_with_failures', 'partially_blocked', 'aborted'}, 'invalid acceptance state')
+        if event['status'] in TERMINAL:
+            leased = pool_run_accounts(project, state['run_id'])['leased']
+            check(not leased, 'leased pool accounts must be returned first: ' + ','.join(leased))
         if event['status'] == 'fully_accepted':
             native = state.get('native_merge_required', False)
             regression = report_artifacts.regression_completeness(
@@ -914,6 +1111,10 @@ def record_event(project, state, spec, cov, event, context=None):
             check(not view['residual_resources'] and not view['global_residual_runs'] and not view['pending_humans'] and not view['blocked_cases'] and not view['work_needed'], 'unfinished work or resources prevent full acceptance')
             check(all(s['status'] not in {'unknown', 'unavailable'} for s in view['source_checks'].values()), 'full acceptance requires readable current sources')
             check(not any(t['status'] not in DONE for t in state['tasks'].values()), 'unfinished tasks prevent full acceptance')
+            accounts = pool_run_accounts(project, state['run_id'])
+            check(not accounts['leased'], 'leased pool accounts must be returned first: ' + ','.join(accounts['leased']))
+            check(not accounts['quarantined'], 'accounts quarantined by this run prevent full acceptance: '
+                  + ','.join(accounts['quarantined']))
             results = case_results(project, state, cov)
             for cid, case in selected.items():
                 if case['execution'] == 'automation':
@@ -1108,7 +1309,9 @@ def summary(project, state, spec, cov, recycled_paths=None):
               'setup_results': {r: sum(e['result'] == r for e in setup) for r in sorted(RESULTS)},
               'issues_by_kind': {kind: sum(e.get('kind') == kind for e in state['issues'].values()) for kind in ['product_candidate', 'script', 'environment', 'needs_decision', 'deferred']},
               'case_results': {r: sum(v == r for v in results.values()) for r in sorted(RESULTS)},
-              'issues': len(state['issues']), 'product_candidates': sum(e.get('kind') == 'product_candidate' for e in state['issues'].values()), 'resources': {r: sum(e['status'] == r for e in state['resources'].values()) for r in ['intent', 'confirmed', 'ambiguous', 'absence_verified']}}
+              'issues': len(state['issues']), 'product_candidates': sum(e.get('kind') == 'product_candidate' for e in state['issues'].values()), 'resources': {r: sum(e['status'] == r for e in state['resources'].values()) for r in ['intent', 'confirmed', 'ambiguous', 'absence_verified', 'retained_verified']},
+              'retained_resources': {m: sum(e['status'] == 'retained_verified' and e.get('retention') == m
+                                            for e in state['resources'].values()) for m in sorted(RETENTION_MODES)}}
     cases = {cid: {'result': value, 'covered': covered(project, cov, cid), 'action': state['case_actions'].get(cid),
                    'executions': [e for e in business if cid in e['case_ids']]} for cid, value in results.items()}
     for cid, action in state['case_actions'].items():
@@ -1222,6 +1425,8 @@ def start(project, args, spec, cov, full=True):
                 check(not any(lease.get('status') == 'active' and lease.get('run_id') == prior['run_id']
                               for lease in quota['leases'].values()),
                       'active task reservations must finish and release/reap before a new round')
+                check(not pool_run_accounts(project, prior['run_id'])['leased'],
+                      'return leased pool accounts before a new round')
             for prior_path in candidates:
                 prior = load(prior_path)
                 prior['acceptance'] = 'partially_blocked'
@@ -1284,7 +1489,7 @@ def start(project, args, spec, cov, full=True):
             pending = {
                 'tasks': {k: v for k, v in prior['tasks'].items() if v['status'] not in DONE and related(v)},
                 'humans': {k: v for k, v in prior['humans'].items() if human_pending(v) and related(v)},
-                'resources': {k: v for k, v in prior['resources'].items() if v['status'] != 'absence_verified'},
+                'resources': {k: v for k, v in prior['resources'].items() if v['status'] not in RESOLVED_RESOURCES},
                 'issues': {k: v for k, v in prior.get('issues', {}).items()
                            if v.get('status') != 'closed' and
                            (not v.get('affected_case_ids') or set(v['affected_case_ids']) & selected)},
@@ -1522,7 +1727,7 @@ def write_report(project, state, spec, cov, persist_state=True):
 
 def main(argv=None):
     parser = JsonArgumentParser(description=__doc__)
-    helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'attempt-interrupted', 'attempt-collect', 'finalize', 'timing'}
+    helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'attempt-interrupted', 'attempt-collect', 'finalize', 'timing', 'pool-lease', 'pool-account', 'pool-return', 'pool-resolve'}
     parser.add_argument('command', choices=['doctor', 'schema', 'init', 'start', 'renew', 'prepare-regression', 'collect-results', 'record', 'status', 'validate', 'report', 'release', *sorted(helpers)])
     parser.add_argument('--project')
     parser.add_argument('--type', dest='event_type')
@@ -1536,6 +1741,11 @@ def main(argv=None):
     parser.add_argument('--reclaim', action='store_true')
     parser.add_argument('--reason')
     parser.add_argument('--new-round', action='store_true')
+    parser.add_argument('--pool')
+    parser.add_argument('--count', type=int)
+    parser.add_argument('--request')
+    parser.add_argument('--workers', type=int)
+    parser.add_argument('--slot', type=int)
     output = parser.add_mutually_exclusive_group()
     output.add_argument('--brief', action='store_true')
     output.add_argument('--full', action='store_true')
@@ -1556,7 +1766,8 @@ def main(argv=None):
         if args.command in helpers:
             helper_spec = importlib.util.spec_from_file_location(
                 'e2e_workflow_tools', Path(__file__).with_name(
-                    'workflow_batch.py' if args.command in {'attempt-collect', 'finalize'} else 'workflow_tools.py'))
+                    'workflow_batch.py' if args.command in {'attempt-collect', 'finalize'}
+                    else 'workflow_pool.py' if args.command.startswith('pool-') else 'workflow_tools.py'))
             helper = importlib.util.module_from_spec(helper_spec)
             helper_spec.loader.exec_module(helper)
             result = helper.dispatch(globals(), project, args)
@@ -1651,10 +1862,12 @@ def main(argv=None):
                         check(args.input, '--input required')
                         events = load(Path(args.input))
                         updated, newcov = apply_events(project, state, spec, cov, args.owner, events, args.writer)
+                        added = updated['events'][len(state['events']):]
+                        sync_recorded_pools(project, updated, added)
                         if newcov != cov:
                             atomic(project / 'test/plans/coverage.json', newcov)
                         atomic(path, updated)
-                        for event in updated['events'][len(state['events']):]:
+                        for event in added:
                             if event['type'] == 'task':
                                 atomic(directory / 'receipts' / (str(event['seq']) + '.json'), event)
                         result = status(project, updated, spec, newcov, full=args.full, include_history=args.full)

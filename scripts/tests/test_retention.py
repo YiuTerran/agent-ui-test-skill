@@ -120,6 +120,75 @@ class RetentionTest(unittest.TestCase):
             self.assertTrue(item['recycled_at'])
             self.assertEqual(['a'], item['original']['scopes'])
 
+    def pool_ledger(self, status='available'):
+        baseline = self.prefix + '/attempts/B/results/output/pool-baseline.json'
+        recovery = self.prefix + '/attempts/B/results/output/pool-quarantine.json'
+        self.write(baseline, {'roles': ['reader']})
+        self.write(recovery, {'unexpected_role': 'writer'})
+        account = {'pool_ref': 'user-01', 'status': status, 'origin': ['old', 'a1'],
+                   'baseline_evidence': [baseline]}
+        if status == 'quarantined':
+            account['history'] = [{'action': 'returned_quarantined', 'evidence': [recovery]}]
+        ledger = {'schema_version': 1, 'pools': {'pool-a': {'accounts': {'user-01': account}}}}
+        self.state['resources']['a1'] = {
+            'resource_id': 'a1', 'status': 'retained_verified', 'retention': 'pooled',
+            'pool': 'pool-a', 'pool_ref': 'user-01', 'evidence': [baseline]}
+        self.write(r.POOL_LEDGER, ledger)
+        return ledger, baseline, recovery
+
+    def test_pool_baseline_and_quarantine_evidence_survive_history_cleanup(self):
+        ledger, baseline, recovery = self.pool_ledger('quarantined')
+        plan = self.plan()
+        self.assertNotIn(baseline, self.paths(plan))
+        self.assertNotIn(recovery, self.paths(plan))
+        self.assertIn(self.noise, self.paths(plan))
+        r.apply_plan(self.project, plan)
+        self.assertTrue((self.project / baseline).exists())
+        self.assertTrue((self.project / recovery).exists())
+        self.assertFalse((self.project / self.noise).exists())
+
+    def test_pool_ledger_changes_after_plan_prevent_deletion(self):
+        ledger, baseline, recovery = self.pool_ledger()
+        plan = self.plan()
+        ledger['pools']['pool-a']['accounts']['user-01']['baseline_evidence'] = [recovery]
+        self.write(r.POOL_LEDGER, ledger)
+        with self.assertRaisesRegex(ValueError, 'identity pool ledger changed'):
+            r.apply_plan(self.project, plan)
+        self.assertTrue((self.project / self.noise).exists())
+
+    def test_pool_ledger_created_after_plan_prevents_deletion(self):
+        plan = self.plan()
+        self.write(r.POOL_LEDGER, {'schema_version': 1, 'pools': {}})
+        with self.assertRaisesRegex(ValueError, 'identity pool ledger changed'):
+            r.apply_plan(self.project, plan)
+
+    def test_pool_ledger_deleted_after_plan_prevents_deletion(self):
+        self.pool_ledger()
+        plan = self.plan()
+        (self.project / r.POOL_LEDGER).unlink()
+        with self.assertRaisesRegex(ValueError, 'identity pool ledger changed'):
+            r.apply_plan(self.project, plan)
+        self.assertTrue((self.project / self.noise).exists())
+
+    def test_pool_current_evidence_is_protected_without_pinning_all_old_history(self):
+        ledger, baseline, recovery = self.pool_ledger('quarantined')
+        account = ledger['pools']['pool-a']['accounts']['user-01']
+        account['quarantine'] = {'evidence': [recovery]}
+        account['history'] = [
+            {'action': 'returned_pooled', 'evidence': [self.noise]},
+            {'action': 'returned_quarantined', 'evidence': [recovery]}]
+        self.write(r.POOL_LEDGER, ledger)
+        plan = self.plan()
+        self.assertNotIn(baseline, self.paths(plan))
+        self.assertNotIn(recovery, self.paths(plan))
+        self.assertIn(self.noise, self.paths(plan))
+        reasons = {item['reason'] for item in plan['diagnostics']['protections']}
+        self.assertIn('identity_pool_reference', reasons)
+
+    def test_disabled_pool_account_retains_its_baseline(self):
+        ledger, baseline, recovery = self.pool_ledger('disabled')
+        self.assertNotIn(baseline, self.paths(self.plan()))
+
     def test_batch_recycling_validates_journals_once_and_has_no_cross_call_cache(self):
         r.apply_plan(self.project, self.plan())
         paths = [self.raw_path, self.html, self.trace, self.noise]

@@ -129,6 +129,11 @@ def require_stopped(wf, state, ledger):
              + 'active_leases=' + str(active) + '; running_tasks=' + str(running))
 
 
+def require_returned(wf, project, state):
+    leased = wf.pool_run_accounts(project, state['run_id'])['leased']
+    wf.check(not leased, 'finalize requires returned pool accounts; leased=' + str(leased))
+
+
 def finalize(wf, project, args):
     tools = sibling('workflow_tools')
     scheduling = sibling('scheduling')
@@ -159,6 +164,7 @@ def finalize(wf, project, args):
             return dict(checkpoint['result'], replayed=True)
         wf.owner_check(state, args.owner)
         require_stopped(wf, state, ledger)
+        require_returned(wf, project, state)
         wf.check(state.get('config_fingerprint') == wf.fingerprint(spec)
                  and state['asset_fingerprint'] == wf.fingerprint(cov)
                  and not state.get('recovery_required'), 'review changed inputs before finalization')
@@ -177,6 +183,7 @@ def finalize(wf, project, args):
         spec, cov = wf.assets(project)
         current = tools.run_state(wf, project, args, owned=True)
         require_stopped(wf, current, ledger)
+        require_returned(wf, project, current)
         wf.check(wf.fingerprint(spec) == config_digest and wf.fingerprint(cov) == coverage_digest,
                  'configuration or coverage changed during finalization; preserve artifacts and inspect')
         wf.check(wf.fingerprint(current) == before, 'run changed during finalization; preserve artifacts and inspect')
@@ -200,6 +207,7 @@ def finalize(wf, project, args):
                 'input_sha256': digest, 'owner': args.owner, 'recorded_at': wf.now(),
                 'applied_event_sha256': applied + [wf.fingerprint(e) for e in batch if e is not merged],
                 'superseded_inputs': history}
+            wf.sync_recorded_pools(project, current, batch)
             wf.atomic(wf.run_path(project, args.run) / 'state.json', current)
         # Keep terminal acceptance tentative until report and target checks succeed.
         # A failed finalization can still collect missing evidence through normal gates.

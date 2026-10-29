@@ -251,3 +251,42 @@ class BatchTest(unittest.TestCase):
                                     'require_full': False})
         self.assertTrue(self.finish()['released'])
         self.assertEqual([], self.state()['executions'])
+
+    def test_finalize_unrelated_issue_never_syncs_pools_with_corrupt_history(self):
+        self.start('--scopes', 'a')
+        self.write('test/.cache/runs/broken/state.json', '{')
+        self.write('finalize.json', {
+            'acceptance': {'status': 'partially_blocked', 'reason': 'Synthetic stop'},
+            'require_full': False,
+            'events': [{'type': 'issue', 'issue_id': 'I1', 'kind': 'environment', 'status': 'open'}]})
+        with mock.patch.object(wf, 'sync_pool_ledger', wraps=wf.sync_pool_ledger) as sync:
+            self.assertTrue(self.finish()['released'])
+        sync.assert_not_called()
+        count = len(self.state()['events'])
+        self.assertTrue(self.finish()['replayed'])
+        self.assertEqual(count, len(self.state()['events']))
+
+    def test_finalize_retained_sync_failure_leaves_checkpoint_and_events_uncommitted(self):
+        self.start('--scopes', 'a')
+        # Use the same resource lifecycle as the standalone pool tests.
+        spec = wf.parse_spec(self.project / 'test/spec.md')
+        spec['identity_pools'] = {'pool-a': {'max_accounts': 1}}
+        self.write('test/spec.md', '```json workflow-config\n' + json.dumps(spec) + '\n```\n')
+        self.start('--resume', self.run, '--scopes', 'a')
+        self.record({'type': 'recovery_review', 'environment_checked': True, 'artifacts_checked': True})
+        resource = {'type': 'resource', 'resource_id': 'a1', 'pool': 'pool-a', 'created_by_run': self.run,
+                    'status': 'intent', 'kind': 'account'}
+        self.record(resource)
+        self.record(dict(resource, status='confirmed', owned=True, receipt='synthetic-create'))
+        self.write('finalize.json', {
+            'acceptance': {'status': 'partially_blocked', 'reason': 'Synthetic stop'},
+            'require_full': False,
+            'events': [dict(resource, status='retained_verified', retention='pooled',
+                            pool_ref='user-01', evidence=['test/evidence.txt'])]})
+        before = self.state()
+        with mock.patch.object(wf, 'sync_pool_ledger', side_effect=OSError('synthetic sync failure')) as sync:
+            self.assertIn('sync failure', self.finish(fail=True)['error'])
+        self.assertEqual(before, self.state())
+        self.assertTrue(sync.call_args.kwargs['current_only'])
+        self.assertTrue(self.finish()['released'])
+        self.assertEqual(1, sum(e.get('status') == 'retained_verified' for e in self.state()['events']))

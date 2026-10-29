@@ -33,6 +33,7 @@ _platform_spec.loader.exec_module(platform_support)
 
 RUNS = 'test/.cache/runs'
 STORE = 'test/.cache/retention'
+POOL_LEDGER = 'test/.cache/identity-pools.json'
 TERMINAL = {'fully_accepted', 'completed_with_failures', 'partially_blocked', 'aborted'}
 ROOT_SMALL = {'state.json', 'summary.json', 'report.md', 'report.html', 'retention-manifest.json'}
 ID = re.compile(r'[A-Za-z0-9_-]+\Z')
@@ -564,11 +565,14 @@ class Snapshot:
         return json.loads(self.read(path))
 
 
+RESOLVED_RESOURCES = {'absence_verified', 'retained_verified'}
+
+
 def protected_state_records(state):
     """Approval decisions and unresolved resource-cleanup evidence."""
     records = [r for r in state['humans'].values()
                if r.get('status') in {'approved', 'rejected'}]
-    records += [r for r in state['resources'].values() if r.get('status') != 'absence_verified']
+    records += [r for r in state['resources'].values() if r.get('status') not in RESOLVED_RESOURCES]
     for task in state['tasks'].values():
         if task.get('phase') == 'case_review' and task.get('status') in {'approved', 'complete'}:
             records.append(task)
@@ -593,6 +597,11 @@ def selection(tree, scopes, current_run=None, previously=None):
         if lease['status'] == 'active':
             reserved_runs.add(identifier(lease.get('run_id')))
     scheduling_guard = snap.guards.get(quota_path)
+    pools = snap.json(POOL_LEDGER) if tree.exists(POOL_LEDGER) else None
+    pool_guard = snap.guards.get(POOL_LEDGER)
+    if pools is not None:
+        require(isinstance(pools, dict) and pools.get('schema_version') == 1
+                and isinstance(pools.get('pools'), dict), 'invalid identity pool ledger')
     spec_text = snap.read('test/spec.md').decode('utf-8')
     blocks = re.findall(r'```json workflow-config\s*\n(.*?)\n```', spec_text, re.S)
     require(len(blocks) == 1, 'invalid workflow-config')
@@ -624,6 +633,18 @@ def selection(tree, scopes, current_run=None, previously=None):
 
     add_refs(config, 'test/spec.md', reason='configured_reference')
     add_refs(cov, 'test/plans/coverage.json', reason='effective_coverage_reference')
+    for name, pool in (pools or {}).get('pools', {}).items():
+        require(isinstance(pool, dict) and isinstance(pool.get('accounts'), dict), 'invalid identity pool accounts')
+        for ref, account in pool['accounts'].items():
+            require(isinstance(account, dict), 'invalid identity pool account')
+            # Current baseline/recovery evidence outlives the run that created it.
+            current = {key: value for key, value in account.items() if key != 'history'}
+            if account.get('status') == 'quarantined':
+                current['quarantine_history'] = next(
+                    (entry for entry in reversed(account.get('history', []))
+                     if entry.get('action') == 'returned_quarantined'), {})
+            add_refs(current, POOL_LEDGER, '/pools/' + name + '/accounts/' + ref,
+                     reason='identity_pool_reference', strict=True)
     # Storage instructions are not evidence; structured paths and explicit links are.
     for path, value in [('test/spec.md', None), *assets.items()]:
         if value is None:
@@ -697,7 +718,7 @@ def selection(tree, scopes, current_run=None, previously=None):
             if not isinstance(record, dict):
                 continue
             is_resource = any(record is resource for resource in state['resources'].values()
-                              if resource.get('status') != 'absence_verified')
+                              if resource.get('status') not in RESOLVED_RESOURCES)
             tokens = set(strings(record)) if is_resource else set()
             case_ids = set(record.get('case_ids', []) + record.get('affected_case_ids', [])) if is_resource else set()
             linked = [e for e in state['executions'] if is_resource and (
@@ -1094,6 +1115,7 @@ def selection(tree, scopes, current_run=None, previously=None):
     return dict(files=sorted(files, key=lambda f: f['path']), bundles=markers, limitations=limitations,
                 diagnostics=diagnostics,
                 scheduling_guard=scheduling_guard,
+                pool_guard=pool_guard,
                 guards=snap.guards, inventory=dict(inventory, **assets))
 
 
@@ -1169,6 +1191,8 @@ def verify_snapshot(tree, plan):
     quota_path = 'test/.cache/scheduling/quota.json'
     guard = tree.read(quota_path)[1] if tree.exists(quota_path) else None
     require(guard == plan.get('scheduling_guard'), 'scheduling reservations changed; create a new plan')
+    pool_guard = tree.read(POOL_LEDGER)[1] if tree.exists(POOL_LEDGER) else None
+    require(pool_guard == plan.get('pool_guard'), 'identity pool ledger changed; create a new plan')
     inventory = tree.walk(RUNS) if tree.exists(RUNS) else {}
     inventory.update(tree.walk('test/plans'))
     # Directory names/inodes and all files must still agree; deletion by this

@@ -63,7 +63,7 @@ python3 "$WF" finalize --project "$PROJECT" --run "$RUN" --owner "$OWNER" --inpu
 - **SOURCE_EVENTS**：实际读取来源并保存快照，实际审批后保存决定/范围证据，再写单事件或数组JSON。恢复还需recovery_review；已有有效baseline未变时只登记source:unchanged，不重做批准。
 - **新增范围**：新增覆盖时将模块缺口清单交给用户选择，用automation_expansion登记真实答复、完整非空清单和范围。明确只回归则保存用户原话与跳过新增决定，不重复征询；完整清单就绪才登记skip事件，无缺口不造事件。清单待核实不阻挡已有合格测试执行，也不以部分清单冒充完整清单或新增授权；完整回归收尾仍核对实际发现。
 - **探索/代码**：在获准范围内补独立测试与真实认证/数据fixture，以case事件更新coverage和完成状态；待选择或未获选的缺口保持待补，已有合格测试继续回归。
-- **实际CLI**：先prepare-regression、领取真实workers配额，再运行spec批准的项目命令。每次独立attempt目录，用JSON/HTML/blob reporters及输出目录参数（详见[报告](reports.md#每次命令独立保存)）；记录真实起止/退出码，失败也teardown、核对资源和释放配额。
+- **实际CLI**：先prepare-regression，再按需租用池账号、领取真实workers配额，运行spec批准的项目命令；池账本变更会使尚未apply的回收计划失效，先完成回收再租号。每次独立attempt目录，用JSON/HTML/blob reporters及输出目录参数（详见[报告](reports.md#每次命令独立保存)）；记录真实起止/退出码，失败也teardown、核对资源和释放配额。
 - **结果采集**：真实回执就绪即调用attempt-collect，程序内部生成bundle并走collect-results原有门禁；多CLI换bundle_id分别采集。complete/unresolved由程序核对，不为登记问题重跑测试。
 - **FINALIZE_INPUT**：使用[批量入口](local-tools.md#确定性批量入口)的结构化输入，声明实际验收终态及full/定向完成标准，附真实资源/issue回执；需要合并时提供项目本地Playwright启动argv，已有有效merge复用。finalize内部依次合并、登记、report核验、release，返回成功摘要后不再检查同一批证据。无目标以明确阻塞终态关闭，不造空bundle。
 
@@ -134,7 +134,7 @@ python3 "$WF" finalize --project "$PROJECT" --run "$RUN" --owner "$OWNER" --inpu
 
 默认总共4个Agent，包含主Agent；主Agent占1个名额，默认最多3个子Agent。4是起始值而非固定上限；有独立任务且宿主有槽位时，可增加至5个及以上。主Agent依据近期整机CPU和内存使用率逐步增减：两项均低于80%才可扩容，任一达到80%则暂停新增并减少后续派发，已有任务正常执行安全清理，不强杀。每次扩容前及新批次派发时复查采样；缺少可靠采样时保持默认或收紧，不把CPU核数、load average或可用内存字节直接当作总体使用率。通过宿主实际槽位和`scheduling.py`的concurrency覆盖值落实调整，`pressure=true`暂停新配额；默认4是起点，宿主槽位、独立任务数量、数据冲突仍是约束。总使用率可能随外部进程变化，采样不能承诺持续低于阈值。探索浏览器+全部Playwright workers共享默认浏览器上限4，按资源/冲突收紧，未知资源从一个浏览器开始；Agent扩容不自动扩大浏览器配额，显式较小配置优先。按真实读写集/服务端冲突组局部串行，读读可共享；不同context或同账号不自动决定隔离/冲突。配额和实际suite都须落实冲突约束。
 
-既有业务数据只读。专用E2E资源按intent→准确ID/owned证明→逆依赖teardown→absence check；创建/删除未知先核实，不猜ID/前缀、不重复创建。人工等待/认证恢复见[浏览器与认证](browser-and-auth.md)，资源继承和安全回收见[契约](contracts.md)。
+既有业务数据只读。专用E2E资源按intent→准确ID/owned证明→逆依赖teardown→absence check，不可删除时登记retained_verified；创建/删除未知先核实，不猜ID/前缀、不重复创建。人工等待/认证恢复见[浏览器与认证](browser-and-auth.md)，资源继承和安全回收见[契约](contracts.md)。
 
 ## 回归及结束
 

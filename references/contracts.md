@@ -27,6 +27,9 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 | `record --run RUN --owner NAME [--writer TASK_WRITER] --input FILE` | FILE为单事件或非空数组；整批验证后提交。委派writer只能更新预先分配给自己的task，不能扩大case/source或修改主run决策 |
 | `prepare-regression --run RUN --owner NAME [--scopes a,b]` | 首次回归前一次安全plan+apply，保护当前run；不运行测试。后续复用，扩scope补预检；详见[回收](#运行历史回收) |
 | `attempt-interrupted --run RUN --owner NAME --bundle ID --reason TEXT` | 生成中断CLI的仅回执事件，按返回路径record；不要求JSON/blob，不产生执行结果 |
+| `pool-lease --run RUN --owner NAME --pool NAME --request ID --count N` | 一次runner调用租N个独占账号；ID为1–64位字母、数字、下划线或连字符。同run/池/ID重试返回原分配，count变化或已有账号归还则拒绝；新调用使用新ID |
+| `pool-account --run RUN --pool NAME --request ID --workers N --slot K` | 只读核验并返回该槽位的pool_ref，不要求owner；run须未结束且租约有效。N须等于租用数，K须在0..N-1且账号仍归该request租用，禁止取模分配 |
+| `pool-return/pool-resolve --run RUN --owner NAME --pool NAME --input FILE` | 输入为`{"accounts":[{pool_ref,result,evidence,issue_id?,reason?}]}`；整批校验后写跨run池账本`test/.cache/identity-pools.json`。return再刷新派生分配文件，同一归还输入在再次租用前可幂等重试；规则见[复用池](browser-and-auth.md#临时身份复用池) |
 | `collect-results --run RUN --owner NAME --input FILE` | FILE为一个report_bundle事件；主owner原子登记bundle与精确映射的execution。失败state不变，原文件保留；不自动批准、清理或验收 |
 | `status --run RUN [--brief或--full]` | 读取本地状态、推导阻塞/后续动作，不读取远端来源或通知用户；默认完整以兼容既有调用 |
 | `validate [--run RUN]` | 检查资产结构、路径、指纹和已提供证据；有run则重核绑定。`valid`不证明业务覆盖或验收；无run返回missing_configuration |
@@ -36,6 +39,12 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 `record`/`collect-results`默认简报，`--brief`可显式指定；包含数量、相关ID及原因，后者还含`collection`的bundle_id、committed、complete、events_recorded、counts、unresolved。`complete=false`仍exit0，表示映射待核实，不代表通过。`--full`输出完整状态及regression_inventory；显式`status`仍默认完整。
 
 `--brief/--full`仅适用于status、record、collect-results；其他命令携带这些参数时直接exit2，不修改状态，不静默忽略。report/validate保持完整证据检查和输出。
+
+身份池的权威账本将request与账号租用原子提交；`identity-leases.json`仅为schema_version=2的派生缓存，按`requests.<request>.pools.<池名>`记录worker_count及accounts。归还槽位置null，不压缩数组；缓存写入失败以原request重试，不另起request租号。fixture按[复用池](browser-and-auth.md#临时身份复用池)核验槽位及实际并发，不能从旧缓存直接取号。
+
+**池账本同步**：record/finalize只对本批新增带pool的retained_verified资源触发同步，且只同步当前run；同步失败先于state和finalize检查点提交，重试不重复追加事件。池登记与state仍非多文件事务：若池登记成功后state写入失败，以原事件重试，登记按资源origin幂等；pool-lease/pool-return会全量补登记。
+
+**request回收**：池账号全部归还后，已用request ID先持久化到各自run的state.closed_pool_requests，再从全局账本清除详细分配；旧ID不可复用。
 
 新增辅助入口的输入、输出及边界见[本地辅助入口](local-tools.md)。preflight的valid只表示本地预检完成，发现完整性由执行者声明；validate-input的valid不表示业务通过，bundle映射待核实仍须看collection.complete/unresolved。正常固定流程不额外调用validate-input/attempt-check。
 
@@ -66,6 +75,7 @@ work_needed_reasons可直接定位review_not_approved、implementation_not_valid
 | `env`、`authref`、`data-policy`、`commands` | 初始null/null/null/{}，须从真实环境、授权和项目命令确认 |
 | `concurrency` | max_parallel_agents=auto，auto_parallel_cap/browser_parallel_cap/playwright_workers均4；默认Agent总数含主Agent，主Agent按近期整机CPU/内存采样调整；两项均低于80%才扩容，预算不等于授权 |
 | `wait` | timeout_seconds=300，poll_seconds=15 |
+| `identity_pools` | 可选，`{<池名>: {max_accounts: 正整数}}`；未声明的池不能登记或租用，上限计入disabled/quarantined及在途intent |
 | `regression`、`retention` | final=all_existing_automation；before_regression=true、reports=summary_and_unresolved_evidence。旧配置缺项按默认读，显式选择不重写 |
 
 init不修改`.gitignore`；写入来源、认证或run证据前，writer必须核实`test/.cache/`被Git忽略，缺兼容规则时补`/test/.cache/`。既有spec没有配置块时按init的spec.workflow-config缺项在原文件补齐。
@@ -117,11 +127,16 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 
 | 事件 | 必填字段 | 条件/可选字段与值 | 门禁 |
 | --- | --- | --- | --- |
-| `resource` | resource_id、status、created_by_run | status=`intent/confirmed/ambiguous/absence_verified`；kind、record_id、identifying_fields、evidence可选；confirmed必填owned=true、receipt | 初建只能intent；resource_id是本地意图ID，服务端准确record_id可确认后补。只建议清理所有权证明完整的confirmed；ambiguous先核实，前缀不证明所有权 |
+| `resource` | resource_id、status、created_by_run | status=`intent/confirmed/ambiguous/absence_verified/retained_verified`；kind、record_id、identifying_fields、evidence可选；confirmed必填owned=true、receipt | 初建只能intent；resource_id是本地意图ID，服务端准确record_id可确认后补。普通资源未指定的kind可在后续转换时补填，已指定则不可改；不得事后转为shared_config。只建议清理所有权证明完整的confirmed；ambiguous先核实，前缀不证明所有权。shared_config和retained_verified见表后说明 |
 | `human` | request_id、status；初建mode | status=`pending_notification/waiting/blocked/approved/rejected/resolved`；mode=`explicit_decision/observable`，后续不可改；case_ids、source_id、evidence可选；timeout_seconds缺省配置上限300 | 主Agent通知/登记；超时推导blocked，无后台轮询。解除须已有请求；observable用resolved+evidence，explicit_decision须approved/rejected，后者仍阻塞，时间/页面可用不能代替审批 |
 | `delegation` | status、reason | status=`unavailable/available`；case_ids可选 | unavailable阻塞对应工作，不声称已委派；available解除相同case集合的委派阻塞 |
 
-资源转换仅允许intent→confirmed/ambiguous/absence_verified、ambiguous→confirmed/absence_verified、confirmed→absence_verified；absence_verified必有证据。created_by_run为本run或显式继承资源的原run。脚本不删除业务资源，执行者按准确ID逆依赖清理并验证absence。
+资源转换仅允许intent→confirmed/ambiguous/absence_verified、ambiguous→confirmed/absence_verified、confirmed→absence_verified/retained_verified；absence_verified必有证据。
+
+- **retained_verified**：仅从confirmed转入，用于应用不支持删除的资源。必带`retention=pooled/disabled`和回读evidence；pooled须在intent声明`pool`（之后不可改），带池内唯一的`pool_ref`（账号引用名），登记后同步进池账本。retention字段不能出现在其他状态。与absence_verified同为已处理终态，不计残留、不阻挡完整验收，counts.retained_resources按retention计数。
+- **shared_config**：intent必带config_key和original_snapshot（`test/.cache/`下JSON），kind/config_key/原值不可改；只能以absence_verified结案，必带restored_snapshot且规范化JSON与原值一致；残留建议restore。
+
+created_by_run为本run或显式继承资源的原run。脚本不删除业务资源，执行者按准确ID逆依赖清理并验证absence。
 
 human范围规则（统一用于status、case更新、baseline）：
 
@@ -198,7 +213,7 @@ fully_accepted还必须同时满足：
 
 - next_steps给本地建议：影响分析、澄清、审批、升级有效baseline、失效修复及未完探索/编码/执行/验收；只省略当前观察版本已完成阶段。blocked_cases保留逐case原因。
 - unavailable暂停需求更新；changed+business_change暂停受影响case直到impact/case_review、必要人工决定及显式baseline完成。未知、缺旧baseline、映射缺口、待审不能借“未变”绕过；无关有效旧基线case可回归。
-- global_residual_runs跨scope列其他run残留及owner_cleanup/owner_reconcile，不取得他人资源。继承账本按origin_resource_id/created_by_run去重，新absence_verified可核销旧条目；本地残留含准确record_id、回执、来源run及建议。
+- global_residual_runs跨scope列其他run残留及owner_cleanup/owner_restore/owner_reconcile，不取得他人资源。继承账本按origin_resource_id/created_by_run去重，新absence_verified或retained_verified可核销旧条目；本地残留含准确record_id、回执、来源run及建议。
 - 缓存丢失可按coverage/文件重建队列，不推测旧执行或usage。coverage_asset_drift仅指本地资产指纹不匹配。
 
 summary按稳定caseID列动作、逐次执行、最终有效结果、显式关联的资源与phase_records；只按case_ids或已登记task_id关联，不按共享任务猜逐例耗时，未关联资源保留全局台账。source_observations及真实requirement_delta保留，不造历史增删量。
@@ -263,12 +278,14 @@ project用真实规范路径，导出计划放项目test目录外；内部注册
 | 规则 | 范围/结果 |
 | --- | --- |
 | 白名单 | 已结束非活跃run的attempts报告/blob/结果/附件、merged报告及不再需的sources/handoffs/discovery；Git资产不回收 |
-| 始终保护 | 当前/活跃/恢复run、有效baseline、显式审批及未核清业务资源必要恢复路径；保留state.json/summary.json/report.md/report.html/command.json |
+| 始终保护 | 当前/活跃/恢复run、有效baseline、显式审批及未核清业务资源必要恢复路径；池账本仍引用的基线及隔离证据（含disabled账号）也保护；保留state.json/summary.json/report.md/report.html/command.json |
 | 历史失败 | 产品/脚本/环境失败、未关issue、旧pending任务和绑定异常不单独保护大报告；保留原结论/小摘要，不要求先登记修复 |
 | 混合模块 | bundle/merged全部scope符合才回收；通用目录说明或.gitignore输出不是保护引用 |
 | 路径安全 | 路径逃逸、symlink、文件替换及Windows别名/句柄边界继续拒绝；无可靠归属/范围或白名单外局部保留，不用glob猜删 |
 
 plan/apply的diagnostics包含candidate_files、selected_files、protected_files、zero_reason、protections、excluded_files_by_reason。candidate=selected+protected，不能重叠；protections含path/source_file/field/reason/files/sample_paths（最多3条），说明首个匹配保护及来源；excluded_files_by_reason说明候选前排除。
+
+身份池证据的保护来源为`identity_pool_reference`；仅扫描当前引用及尚未解除隔离的必要历史证据，不永久保护全部历史记录。计划同时固定池账本快照；计划生成后账本新增、删除或修改均拒绝apply，须核实后重新规划。先回收（prepare-regression或plan/apply），再租号执行；租用、归还及请求回收都使旧计划失效，不在runner执行期间预存计划待后用。
 
 零回收可为no_eligible_history（无历史/全部活跃/无本轮产物）或protected_references，非零时zero_reason=null。仅候选去向无法解释或重叠报cleanup_candidate_mismatch、exit2并附样例，不把零回收一律判失败；其他安全错误照常拒绝。异常一次定位，输入未变不重复plan/apply、改工具或多轮安装；相关清理未完成不测试，独立范围可继续。
 
