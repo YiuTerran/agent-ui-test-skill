@@ -38,6 +38,8 @@ test/.cache/runs/<run-id>/
 
 新增共享fixture、微应用导航或复杂表单控件时，先选择覆盖不同交互分支的少量代表用例，以实际CLI验证创建回执、定位、持久化和逆依赖清理。离线夹具测试覆盖在途请求动态加入、超时及空集合等实际涉及的分支；静态检查通过与ego探索成功各自不能代替Playwright路径验证。代表用例因已确认产品差异失败时，保留需求断言，核对其余步骤是否实际到达；未到达的交互分支保持待验证。
 
+代表流程的执行时机和次数见[工作流](workflow.md#覆盖缺口门禁与模块补全)。优先验证本次新引入的风险，只验证本次涉及的分支；项目特有的接口约定、数据格式和控件经验写入目标项目的`test/spec.md`或模块计划。预期未规定的边界先澄清，不自行加断言后再通过改预期消除失败。
+
 执行前结合稳定的同规模历史批次、实际test数、workers及test/fixture/teardown预算估计本批墙钟。可用项目支持的global timeout约束整批，执行选择和timeout参数在attempt-init之前确定并进入计划。业务超时预算与宿主命令的输出等待窗口分别设置，等待窗口到期只表示工具返回会话句柄，不表示runner退出。
 
 无新完成用例、输出或资源观察的间隔超过当前步骤及teardown预算时，只做一次有针对性的检查：进程仍在运行与否、最近runner输出、断网/浏览器启动错误及资源账本。持续有进展则继续；真实长业务步骤按其预算等待。确认失去进展后优先使用runner支持的受控中断，保留输出、真实起止、已知退出码（未知时显式null并说明原因）及可取得的产物，等待teardown并核清创建结果；进程与清理状态未核清时继续保留配额。中断产物不齐时通过[attempt-interrupted](local-tools.md#attempt准备与事件生成)登记仅回执调用，报告与计时保留它，不补造测试结果或启动相同写操作。
@@ -49,6 +51,8 @@ test/.cache/runs/<run-id>/
 - 环境/认证问题：恢复已确认的网络、浏览器启动权限或身份条件后再验证；Setup失败的依赖目标按实际project配置/日志列为未执行，不算业务失败或脚本修复次数
 - 证据绑定问题：修复计划、路径或映射，复用原始产物；仅当确需新的真实执行证据时才新增CLI
 
+修复共享代码时一次审阅同根因消费者，定向验证受影响目标，稳定后再收尾full。缺账号、独占租户或设备链路只阻塞相关目标；已有代码的真实skip、尚未编码和预期待澄清分别保留，不能通过重复执行解决前置条件缺失。
+
 完整回归的收尾目标是当前代码的一次full，不是固定运行多轮；已有当前代码完整证据时，不为收尾重复执行。全量后代码变化会使相关结果失效，需要完整验收时补齐当前版本full。定向复测不补full、不声称完整验收；仅本地修复不自动启动线上E2E。预计会继续修复共享夹具时，先定向验证，不提前以全量代替调试。CLI运行期间只并行只读诊断、资源审阅或独立写集工作，实际runner读取的测试、fixture和配置保持稳定。
 
 报告阶段分别检查原生merge与工作流report进程。有CPU活动或产物写出时保留现有调用，必要时一次定点诊断；不并发重启report或用重跑测试处理报告计算缓慢。工具修改属于独立维护范围，实际测试轮内保留错误及证据后按授权处置。
@@ -57,7 +61,7 @@ test/.cache/runs/<run-id>/
 
 执行者准备一个`report_bundle`事件，由主owner收集：
 
-优先用[Attempt模板](local-tools.md#attempt准备与事件生成)准备目录和reporter参数，实际CLI回执落command.json，attempt-bundle统一检查并生成事件；已有完整且真实的bundle事件仍可直接collect-results，正常不额外调用attempt-check或validate-input。
+优先用[Attempt模板](local-tools.md#attempt准备与事件生成)准备目录和reporter参数，实际CLI回执落command.json，正常使用[attempt-collect](local-tools.md#一次采集)在一次调用内检查、生成事件和采集；已有完整且真实的bundle事件可直接collect-results，不再重复准备，不额外调用attempt-check或validate-input。
 
 新Attempt生成的bundle保留plan路径和摘要，直接采集也执行相同契约。全量完整性同时比较发现清单/实际目标及计划中的测试代码/配置指纹，保留缺失、多余、Setup、分片和code_changed_after_full差异；分片不能跨代码版本拼成full。原始结果不因当前代码变化而改写，collect-results的complete仅指结果绑定完整，不能替代当前代码的全量完整性。指纹范围与扩展目录见[Attempt准备](local-tools.md#attempt准备与事件生成)。
 
@@ -98,7 +102,7 @@ test/.cache/runs/<run-id>/
 
 ZIP和附件一起保存摘要。旧bundle缺少blob仍可读取并标限制，不代表原生合并完成，也不允许新run省略blob。
 
-默认只调用一次：
+正常只调用一次attempt-collect。以下collect-results是其底层采集接口，用于已有真实bundle事件或定点恢复：
 
 ```sh
 python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --owner OWNER --input bundle-event.json
@@ -131,13 +135,13 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 
 `validate --run`及`report`重核文件指纹与逐次映射，失败exit2并保留原因。HTML只读取已识别的Playwright内嵌ZIP格式；未知格式不可校验，不默认通过。保留原HTML、JSON和blob，记录阻塞并按安装版本处理适配；新run不能改用JSON-only绕过。旧run仅可按其既有历史限制供人工查看。
 
-`summary.json`及`report.md`包含`report_bundles`和`report_consistency`。bundle中的`passed`表示已比较HTML/JSON，`json_only`表示仅提供JSON；整轮`checked`表示已登记bundle及所有原始result均有对应回执，`partial`表示仍有未绑定旧回执，`unregistered`表示尚未登记bundle，`failed`表示发现差异。旧run仍可读取，旧回执不能据此被声称已验证报告一致性。机器检查不证明命令实际参数、角色指定、业务预期或人类可读性，主Agent仍需审阅原始命令与必要报告内容。
+`summary.json`及`report.md`包含`report_bundles`和`report_consistency`。bundle中的`passed`表示已比较HTML/JSON，`json_only`表示仅提供JSON；整轮`checked`表示已登记bundle及所有原始result均有对应回执，`partial`表示仍有未绑定旧回执，`unregistered`表示尚未登记bundle，`failed`表示发现差异。旧run仍可读取，旧回执不能据此被声称已验证报告一致性。机器检查不证明业务语义和人类可读性；新失败、来源歧义或报告缺少必要内容时由Agent审阅相关证据。正常收尾读取组合入口摘要直接交付，真实命令由执行程序记录，不重复人工式扫描。
 
 ## 最终合并与未通过优先
 
 每轮最终交付一个`report.html`入口，收纳本轮全部CLI，包含Setup、业务、retry、重复执行及未执行目标。顺序为失败→非预期/重跑后通过→跳过/未执行→普通通过；保留每次原始尝试及其批次，不能用最终pass隐藏首次失败。入口直接链接合并的Playwright原生HTML，并保留各次HTML、原始JSON及错误详情入口；未绑定的原始失败也显示，并标明报告一致性限制。
 
-原生合并由主Agent或获派的低思考等级runner执行本地项目同版本Playwright，属于离线产物处理，不重跑测试：
+正常使用[finalize](local-tools.md#一次收尾)完成以下内部顺序，属于离线产物处理，不重跑测试；步骤列出机器契约，不是逐项交回Agent的检查点。已有有效合并直接复用，只有需诊断或手动恢复时分步执行：
 
 1. 将本轮所有已登记`blob_reports`复制到独立合并输入目录，用bundleID前缀避免同名覆盖，核对数量和SHA-256；不混入历史run。本轮失败CLI也纳入，新run缺blob必须阻塞，不以“限制”替代门禁
 2. 运行项目包管理器对应的`playwright merge-reports --reporter=html <input-dir>`，将`PLAYWRIGHT_HTML_OUTPUT_DIR`设为`test/.cache/runs/<run-id>/merged/playwright`，`PLAYWRIGHT_HTML_OPEN=never`。PowerShell使用环境变量赋值或显式merge配置。保持安装版本和testDir一致，不在线升级依赖
@@ -155,7 +159,7 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 
 尚未进入下一轮回收的旧轮次若缺blob，交付各原始HTML及失败优先索引并明确“无法原生合并”；不通过重跑或把JSON重建索引冒充历史原生报告。新增CLI后原合并失效，须重新合并、登记；合并输入、输出及附件指纹都重核。summary的report_paths给出review_html和merged_html；合并不改变逐case结论或runner原始计数。
 
-脚本核验的是产物内容一致性，命令及退出码由执行者如实登记。主Agent审阅真实进程输出及输入清单后确认原生合并成功；ZIP元数据或登记的命令文本不单独证明进程实际执行。
+脚本核验的是产物内容一致性，命令及退出码由执行者如实登记。组合入口直接观察真实子进程退出码并保留命令回执；手动执行须沿用真实进程输出及输入清单。ZIP元数据或登记的命令文本不单独证明进程实际执行。
 
 ## 历史报告与回收
 
@@ -168,6 +172,13 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 耗时区分用户请求到最终交付的可观测会话墙钟、run创建到summary取样的timing.wall_seconds、实际runner调用时长及报告生成耗时。summary.generated_at是汇总取样时点；report_generation记录报告正文和续租状态写出后的完成采样，不含最后summary落盘、stdout、释放租约和最终答复。会话边界优先核查当前宿主日志，脚本内run墙钟不能代替用户体感。
 
 现有任务/日志能够支持时补充准备、来源读取、探索、编码、工具修复、协调/收尾及人工等待，使用已有粗粒度phase_time或宿主证据，未知保持null。连续时间线与重叠工作区间分开展示；并行按区间并集，串行才相加。CLI墙钟与result.duration/实际区间差额单列未归因，其中可能包含启动、teardown、reporter和外部等待；逐test时长也含等待与超时，不称持续有效操作时间。human_wait_seconds只覆盖已登记的人等事件；范围选择问答可另据宿主时间线恢复。计数、时间和绑定差异尽量在最终报告生成前一次核对，复盘用只读timing，不重开终态run或重跑report。
+
+耗时复盘：
+
+- 新增编码轮与纯回归轮分开比较；只比较同范围、同skip条件、同workers的执行
+- 复用已有命令/任务时间戳，重点看首次CLI前、批次间、正式full及full结束到交付的区间；phase_time按任务生命周期合批写入，不为计时打断Agent
+- 非零退出批次包含批内有效结果，不全算浪费；未归因区间不等于模型思考或空闲；报告生成的数秒不代表整个收尾耗时
+- 并发度由结果区间估算，不当作CPU利用率，也不据此扩大配额；时间戳不足时保留unknown
 
 报告一致性核验在同一项目锁内批量读取一次已校验的回收日志，当前调用内供bundle、合并产物和报告链接判断复用。各次调用重新验证日志、计划与路径状态，继续检查保留文件SHA-256及全部逐次映射；损坏日志、无日志缺失或重新出现的路径均不能凭历史快照认定已回收。
 
@@ -196,7 +207,7 @@ Setup单列统计。只有在确认project依赖关系或runner日志后，才�
 
 ## 一份可用的人类报告
 
-主Agent至少审阅一份开发能据以定位问题的报告。HTML包含足够错误、回读附件和清理记录时，可作为主要阅读入口，`report.md`仅需保留工作流摘要、统计口径、差异与链接。无需重复维护两份详细叙述。
+发现新业务失败、映射歧义或报告内容不足时，Agent审阅相关失败步骤和附件；正常通过的确定性收尾使用组合入口已核验的摘要直接交付，不为逐例人工阅读增加一轮往返。报告应能让开发定位问题。HTML包含足够错误、回读附件和清理记录时，可作为主要阅读入口，`report.md`仅需保留工作流摘要、统计口径、差异与链接。无需重复维护两份详细叙述。
 
 HTML缺失或信息不足时，在执行回执中补充`failure_details`，由脚本写入`report.md`：
 

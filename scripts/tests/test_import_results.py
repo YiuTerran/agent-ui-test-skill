@@ -53,13 +53,16 @@ class ImportResultsTest(unittest.TestCase):
         test = dict(projectName=project, status=outcome, results=results, **fields)
         return {'file': cid + '.spec.ts', 'title': 'Synthetic ' + cid, 'line': 12, 'column': 3, 'tests': [test]}
 
-    def prepare(self, targets=None, projects=None, nested=False, html=False, suites=None, **bundle_fields):
+    def prepare(self, targets=None, projects=None, nested=False, html=False, suites=None,
+                repeat_each=None, **bundle_fields):
         targets = targets if targets is not None else [self.target()]
         suite = {'specs': targets}
         self.raw = {'config': {'rootDir': str(self.project / 'test/src'), 'projects': projects or []},
                     'stats': {'startTime': '2026-01-01T00:00:00Z', 'duration': 9000},
                     'errors': [], 'suites': suites if suites is not None else (
                         [{'suites': [suite]}] if nested else [suite])}
+        if repeat_each is not None:
+            self.raw['config']['repeatEach'] = repeat_each
         pairs = wf.report_artifacts.json_tests(self.raw)
         for outcome in imp.OUTCOMES:
             self.raw['stats'][outcome] = sum(t['status'] == outcome for _, t in pairs)
@@ -167,6 +170,100 @@ class ImportResultsTest(unittest.TestCase):
         self.assertEqual(2, result['counts']['unresolved'])
         self.assertEqual({'ambiguous_runner_spec_identity'},
                          {item['reason'] for item in result['unresolved']})
+
+    def split_repeat_targets(self, count=2):
+        targets = [self.target(statuses=('failed', 'passed'))]
+        targets.extend(self.target() for _ in range(count - 1))
+        for index, target in enumerate(targets):
+            target['id'] = f'declaration-repeat-{index}'
+        return targets
+
+    def assert_ambiguous_specs(self):
+        result = self.result()
+        self.assertEqual([], result['events'])
+        self.assertEqual({'ambiguous_runner_spec_identity'},
+                         {item['reason'] for item in result['unresolved']})
+
+    def test_repeat_specs_without_repeat_indices_keep_failures_and_bind_once(self):
+        self.prepare(self.split_repeat_targets(), repeat_each=2, nested=True)
+        result = self.result()
+        self.assertEqual([], result['unresolved'])
+        events = result['events']
+        self.assertEqual(['fail', 'pass', 'pass'], [e['result'] for e in events])
+        self.assertEqual([1, 2, 3], [e['attempt'] for e in events])
+        self.assertEqual(3, len({e['execution_id'] for e in events}))
+        self.assertTrue(all('runner_repeat_each_index' not in e for e in events))
+        self.record(events)
+        self.assertEqual('checked', wf.report_consistency(self.project, self.state())['status'])
+        self.assertEqual(3, self.result()['counts']['already_registered'])
+
+    def test_repeat_specs_with_explicit_indices_do_not_need_spec_ids(self):
+        targets = [self.target(repeatEachIndex=index) for index in range(2)]
+        self.prepare(targets, repeat_each=2)
+        result = self.result()
+        self.assertEqual([], result['unresolved'])
+        self.assertEqual([0, 1], [e['runner_repeat_each_index'] for e in result['events']])
+        self.record(result['events'])
+
+    def test_repeat_specs_use_project_repeat_count_from_real_reporter_shape(self):
+        self.prepare(self.split_repeat_targets(), projects=[
+            {'name': 'auth', 'id': 'auth', 'repeatEach': 1},
+            {'name': 'chromium', 'id': 'chromium', 'repeatEach': 2}])
+        result = self.result()
+        self.assertEqual([], result['unresolved'])
+        self.assertEqual(['fail', 'pass', 'pass'], [e['result'] for e in result['events']])
+        self.record(result['events'])
+
+    def test_split_repeat_project_count_takes_precedence_over_global(self):
+        self.prepare(self.split_repeat_targets(), repeat_each=2, projects=[
+            {'name': 'chromium', 'repeatEach': 1}])
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_rejects_ambiguous_project_names(self):
+        self.prepare(self.split_repeat_targets(), repeat_each=2, projects=[
+            {'name': 'chromium', 'id': 'first', 'repeatEach': 2},
+            {'name': 'chromium', 'id': 'second', 'repeatEach': 2}])
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_requires_declared_repeat_count(self):
+        self.prepare(self.split_repeat_targets())
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_rejects_duplicate_spec_ids(self):
+        targets = self.split_repeat_targets()
+        targets[1]['id'] = targets[0]['id']
+        self.prepare(targets, repeat_each=2)
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_rejects_missing_source_location(self):
+        targets = self.split_repeat_targets()
+        for target in targets:
+            target.pop('line')
+        self.prepare(targets, repeat_each=2)
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_rejects_different_source_locations(self):
+        targets = self.split_repeat_targets()
+        targets[1]['line'] += 1
+        self.prepare(targets, repeat_each=2)
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_rejects_distinct_describe_paths(self):
+        targets = self.split_repeat_targets()
+        self.prepare(suites=[{'title': 'describe-a', 'specs': targets[:1]},
+                             {'title': 'describe-b', 'specs': targets[1:]}], repeat_each=2)
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_rejects_excess_repetitions(self):
+        self.prepare(self.split_repeat_targets(count=3), repeat_each=2)
+        self.assert_ambiguous_specs()
+
+    def test_split_repeat_rejects_duplicate_explicit_indices(self):
+        targets = self.split_repeat_targets()
+        for target in targets:
+            target['tests'][0]['repeatEachIndex'] = 0
+        self.prepare(targets, repeat_each=2)
+        self.assert_ambiguous_specs()
 
     def test_raw_attempt_and_explicit_end_time_are_preserved_separately(self):
         self.record(base.WorkflowTest.execution(self, 'previous', attempt=7))

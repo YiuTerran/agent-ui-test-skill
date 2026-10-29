@@ -118,6 +118,47 @@ def relative_file(project, value, root=None):
     return path.relative_to(project).as_posix() if path.is_relative_to(project) else None
 
 
+def repeated_spec_identity(raw, locations, project_name):
+    """Accept split repeat specs only with one source declaration and distinct repeats."""
+    config = raw.get('config', {})
+    projects = [project for project in config.get('projects', [])
+                if project.get('name') == project_name]
+    if len(projects) > 1:
+        return False
+    repeat_each = (projects[0]['repeatEach'] if projects and 'repeatEach' in projects[0]
+                   else config.get('repeatEach'))
+    if type(repeat_each) is not int or not 1 < len(locations) <= repeat_each:
+        return False
+    declarations, repeat_ids, spec_ids = set(), [], []
+    for location in locations:
+        spec = at_pointer(raw, location)
+        line, column = spec.get('line'), spec.get('column')
+        if type(line) is not int or line <= 0 or type(column) is not int or column <= 0:
+            return False
+        # JSONReporter may emit separate specs for repeats, but their describe ancestry stays the same.
+        parts, ancestry = location.strip('/').split('/'), []
+        offset = 0
+        while offset < len(parts) and parts[offset] == 'suites':
+            offset += 2
+            suite = at_pointer(raw, '/' + '/'.join(parts[:offset]))
+            ancestry.append(tuple(suite.get(key) for key in ('title', 'file', 'line', 'column')))
+        declarations.add((tuple(ancestry), line, column))
+        tests = [test for test in spec.get('tests', [])
+                 if test.get('projectName', '') == project_name]
+        if len(tests) != 1:
+            return False
+        repeat_ids.append(tests[0].get('repeatEachIndex'))
+        spec_ids.append(spec.get('id'))
+    if len(declarations) != 1:
+        return False
+    if any(index is not None for index in repeat_ids):
+        return (all(type(index) is int and 0 <= index < repeat_each for index in repeat_ids)
+                and len(set(repeat_ids)) == len(repeat_ids))
+    # Some reporter versions omit repeatEachIndex; never invent indices for their events.
+    return (all(isinstance(value, str) and value for value in spec_ids)
+            and len(set(spec_ids)) == len(spec_ids))
+
+
 def mapping(project, raw, cov, state, bundle):
     """Index exact identities; never use title substrings, case IDs or basenames."""
     root_value = raw.get('config', {}).get('rootDir')
@@ -135,6 +176,9 @@ def mapping(project, raw, cov, state, bundle):
         identities[pointer] = (*key, test.get('projectName', ''))
         projects.setdefault(key, set()).add(test.get('projectName', ''))
         spec_locations.setdefault(identities[pointer], set()).add(pointer.rsplit('/tests/', 1)[0])
+    ambiguous_specs = {identity for identity, locations in spec_locations.items()
+                       if len(locations) > 1
+                       and not repeated_spec_identity(raw, locations, identity[2])}
     indexed, coverage_index = {}, {}
     ids = Counter(c.get('test_id') for c in cov['cases'].values()
                   if c.get('implementation') != 'retired')
@@ -153,7 +197,7 @@ def mapping(project, raw, cov, state, bundle):
             reason = 'no_exact_coverage_match'
         elif len(matches) != 1:
             reason = 'ambiguous_coverage_match'
-        elif len(spec_locations[(file, title, name)]) != 1:
+        elif (file, title, name) in ambiguous_specs:
             reason = 'ambiguous_runner_spec_identity'
         else:
             cid, case, explicit_project = matches[0]

@@ -245,25 +245,36 @@ def code_path(project, value):
     return path
 
 
-CODE_EXCLUDED_DIRS = {'node_modules', '.cache', '__pycache__'}
+# Dependencies, caches and conventional runner output (storageState, results, reports) are not code.
+CODE_EXCLUDED_DIRS = {'node_modules', '.cache', '__pycache__', '.auth',
+                      'test-results', 'playwright-report', 'blob-report'}
+LEGACY_CODE_EXCLUDED_DIRS = {'node_modules', '.cache', '__pycache__'}
 
 
-def code_snapshot(project, specs, roots, config_files=()):
+def code_snapshot(project, specs, roots, config_files=(), excluded_dirs=None, excluded_paths=()):
     """Hash code trees and their file sets without dependency/generated caches."""
     def unreadable(error):
         raise error
 
+    excluded_dirs = CODE_EXCLUDED_DIRS if excluded_dirs is None else set(excluded_dirs)
+    excluded_paths = set(excluded_paths)
+
+    def skipped(value):
+        return any(Path(value).is_relative_to(Path(p)) for p in excluded_paths)
+
     files = set(specs) | set(config_files)
     for relative in roots:
         directory = code_path(project, relative)
-        if not directory.exists():
+        if not directory.exists() or skipped(relative):
             continue
         if directory.is_file():
             files.add(relative)
             continue
         check(directory.is_dir(), 'code snapshot root must be a directory: ' + relative)
         for parent, dirs, names in os.walk(directory, followlinks=False, onerror=unreadable):
-            dirs[:] = [name for name in dirs if name not in CODE_EXCLUDED_DIRS]
+            base = Path(parent).relative_to(project.resolve())
+            dirs[:] = [name for name in dirs
+                       if name not in excluded_dirs and not skipped((base / name).as_posix())]
             for name in dirs + names:
                 path = Path(parent, name)
                 value = path.relative_to(project.resolve()).as_posix()
@@ -276,7 +287,8 @@ def code_snapshot(project, specs, roots, config_files=()):
         check(path.is_file() and stat.S_ISREG(path.stat().st_mode), 'code snapshot file missing or nonregular: ' + value)
         hashes[value] = hashlib.sha256(path.read_bytes()).hexdigest()
     snapshot = {'schema_version': 2, 'specs': sorted(set(specs)), 'roots': sorted(set(roots)),
-                'config_files': sorted(set(config_files)), 'files': hashes}
+                'config_files': sorted(set(config_files)), 'excluded_dirs': sorted(excluded_dirs),
+                'excluded_paths': sorted(excluded_paths), 'files': hashes}
     snapshot['sha256'] = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
     return snapshot
 
@@ -290,6 +302,24 @@ def project_code_path(project, value):
         if ancestor.resolve() == project:
             return project / path.relative_to(ancestor)
     return path
+
+
+def discovered_excluded_paths(project, raw, extra=()):
+    """Runner output directories plus caller-declared generated paths such as storageState files."""
+    project = project.resolve()
+    values = set()
+    for item in raw.get('config', {}).get('projects') or []:
+        output = item.get('outputDir') if isinstance(item, dict) else None
+        if isinstance(output, str) and output:
+            path = Path(output.replace('\\', '/'))
+            path = project_code_path(project, path if path.is_absolute() else project / path)
+            if path.is_relative_to(project) and path != project:
+                values.add(path.relative_to(project).as_posix())
+    for value in extra:
+        code_path(project, value)
+        check(Path(value).as_posix() not in {'', '.'}, 'code_excluded_paths cannot exclude the project root')
+        values.add(Path(value).as_posix())
+    return values
 
 
 def discovered_code_scope(project, raw, extra_roots=()):
@@ -333,9 +363,10 @@ def discovered_code_scope(project, raw, extra_roots=()):
     return specs, roots, configs
 
 
-def discovered_code_snapshot(project, raw, setup_projects, extra_roots=()):
+def discovered_code_snapshot(project, raw, setup_projects, extra_roots=(), excluded_paths=()):
     specs, roots, configs = discovered_code_scope(project, raw, extra_roots)
-    return code_snapshot(project, specs, roots, configs)
+    return code_snapshot(project, specs, roots, configs,
+                         excluded_paths=discovered_excluded_paths(project, raw, excluded_paths))
 
 
 def code_import_hints(project, raw, extra_roots=()):
@@ -394,7 +425,15 @@ def code_snapshot_difference(project, saved):
     if not saved or saved.get('schema_version') != 2:
         return {'status': 'incomplete', 'reason': 'code_fingerprint_missing'}
     try:
-        current = code_snapshot(project, saved['specs'], saved['roots'], saved['config_files'])
+        legacy = 'excluded_dirs' not in saved
+        current = code_snapshot(project, saved['specs'], saved['roots'], saved['config_files'],
+                                excluded_dirs=LEGACY_CODE_EXCLUDED_DIRS if legacy else saved['excluded_dirs'],
+                                excluded_paths=saved.get('excluded_paths', []))
+        if legacy:
+            # Snapshots recorded before exclusion fields keep their original digest shape.
+            for key in ('excluded_dirs', 'excluded_paths', 'sha256'):
+                current.pop(key)
+            current['sha256'] = hashlib.sha256(json.dumps(current, sort_keys=True).encode()).hexdigest()
         previous = saved['files']
         if current == saved:
             return {'status': 'checked', 'reason': None}

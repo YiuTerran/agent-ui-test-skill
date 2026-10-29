@@ -260,6 +260,83 @@ import '../../shared/root.ts';
         self.assertEqual('complete', result['status'])
         self.assertEqual([['E2']], [g['bundle_ids'] for g in result['groups'] if g['complete']])
 
+    def test_finalize_remerges_when_registered_merge_misses_a_new_bundle(self):
+        self.full()
+        first = wf.load(self.project / self.state()['report_bundles']['E1']['execution_result'])
+        self.write('full-new.json', {'command': ['pnpm', 'exec', 'playwright', 'test'],
+                                    'cwd': '.', 'environment': 'synthetic', 'scope': ['a', 'b'],
+                                    'setup_projects': ['auth'], 'regression_mode': 'full'})
+        self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E2',
+                 '--input', str(self.project / 'full-new.json'))
+        second = self.evidence(bid='E2', targets=('C1', 'C2'))
+        self.collect(self.finish(bid='E2'))
+        self.assertEqual(['E1'], self.state()['merged_report']['bundle_ids'])
+        combined = copy.deepcopy(first)
+        combined['suites'] += copy.deepcopy(second['suites'])
+        for key in ('expected', 'unexpected', 'skipped', 'flaky'):
+            combined['stats'][key] += second['stats'][key]
+        calls = []
+
+        def merge(argv, **kw):
+            calls.append(argv)
+            self.assertEqual(2, len(list(reports.Path(argv[-1]).glob('*.zip'))))
+            self.html({'html_report': str(reports.Path(kw['env']['PLAYWRIGHT_HTML_OUTPUT_DIR']) / 'index.html')},
+                      combined)
+            return type('Process', (), {'returncode': 0})()
+
+        self.write('finalize.json', {'acceptance': {'status': 'completed_with_failures',
+                                                    'reason': 'Synthetic decision',
+                                                    'evidence': ['test/evidence.txt']},
+                                     'merge': {'command': ['pnpm', 'exec', 'playwright']}})
+        with mock.patch.object(wf, 'now', return_value=self.later.isoformat()), \
+                mock.patch('subprocess.run', side_effect=merge):
+            result = self.cli('finalize', '--run', self.run, '--owner', self.owner,
+                              '--input', str(self.project / 'finalize.json'))
+        self.assertEqual(1, len(calls))
+        self.assertTrue(result['released'])
+        self.assertEqual({'E1', 'E2'}, set(self.state()['merged_report']['bundle_ids']))
+
+    def test_runner_output_written_during_full_is_not_code_drift(self):
+        raw = self.inventory()
+        raw['config']['projects'] = [{'name': 'chromium', 'outputDir': str(self.project / 'test/src/out')}]
+        self.full(raw)
+        for value in ('test/src/.auth/user.json', 'test/src/test-results/trace.zip',
+                      'test/src/playwright-report/index.html', 'test/src/blob-report/report.zip',
+                      'test/src/out/run.log'):
+            self.write(value, 'generated during the run')
+        self.assertEqual('complete', self.completeness()['status'])
+        self.write('test/src/pages/model.ts', '// real code change')
+        self.assertEqual('code_changed_after_full', self.completeness()['groups'][0]['code_check']['reason'])
+
+    def test_declared_storage_state_path_is_excluded_and_root_exclusion_rejected(self):
+        self.start()
+        self.check_sources()
+        self.preflight()
+        request = {'command': ['pnpm', 'exec', 'playwright', 'test'], 'cwd': '.', 'environment': 'synthetic',
+                   'scope': ['a', 'b'], 'setup_projects': ['auth'], 'regression_mode': 'full'}
+        self.write('test/src/state/user.json', '{}')
+        self.write('full.json', dict(request, code_excluded_paths=['test/src/state']))
+        result = self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E1',
+                          '--input', str(self.project / 'full.json'))
+        snapshot = wf.load(self.project / result['plan'])['code_snapshot']
+        self.assertNotIn('test/src/state/user.json', snapshot['files'])
+        self.write('test/src/state/user.json', '{"refreshed":true}')
+        self.assertEqual('checked', wf.report_artifacts.code_snapshot_difference(self.project, snapshot)['status'])
+        self.write('full.json', dict(request, code_excluded_paths=['.']))
+        self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E2',
+                 '--input', str(self.project / 'full.json'), fail=True)
+
+    def test_snapshot_without_exclusion_fields_keeps_legacy_comparison(self):
+        self.write('test/src/pages/model.ts', 'export const model = 1')
+        snapshot = copy.deepcopy(self.full()['code_snapshot'])
+        for key in ('excluded_dirs', 'excluded_paths', 'sha256'):
+            snapshot.pop(key)
+        snapshot['sha256'] = wf.hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+        self.assertEqual('checked', wf.report_artifacts.code_snapshot_difference(self.project, snapshot)['status'])
+        self.write('test/src/pages/model.ts', '// changed')
+        self.assertEqual('code_changed_after_full',
+                         wf.report_artifacts.code_snapshot_difference(self.project, snapshot)['reason'])
+
     def test_shards_from_different_code_snapshots_do_not_combine(self):
         self.full()
         bundles = copy.deepcopy(self.state()['report_bundles'])

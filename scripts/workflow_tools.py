@@ -283,8 +283,10 @@ def attempt_init(wf, project, args):
             plan['discovery'] = inventory
             roots = request.get('code_roots', [])
             string_array(wf, roots, 'code_roots')
+            excluded = request.get('code_excluded_paths', [])
+            string_array(wf, excluded, 'code_excluded_paths')
             plan['code_snapshot'] = wf.report_artifacts.discovered_code_snapshot(
-                project, wf.load(path), plan['setup_projects'], roots)
+                project, wf.load(path), plan['setup_projects'], roots, excluded)
             plan['code_scope_review'] = wf.report_artifacts.code_import_hints(project, wf.load(path), roots)
         plan['shard'] = wf.report_artifacts.command_shard(plan['command'])
         plan.update(bundle_id=args.bundle, run_id=state['run_id'], schema_version=2,

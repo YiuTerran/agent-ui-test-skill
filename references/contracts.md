@@ -16,6 +16,8 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 | `validate-input --run RUN --owner NAME --type TYPE --input FILE` | 无副作用重放record或collect-results门禁；TYPE=source/execution/record/report_bundle，不提交状态、coverage或创建锁 |
 | `attempt-init --run RUN --owner NAME --bundle ID --input FILE` | 按真实计划创建新attempt与输出参数；无执行时间/退出码，不执行CLI，拒绝覆盖 |
 | `attempt-bundle/attempt-check --run RUN --owner NAME --bundle ID [--input FILE]` | 核对真实command.json与JSON/HTML/blob；bundle排他生成事件供collect-results，check仅诊断，不登记执行 |
+| `attempt-collect --run RUN --owner NAME --bundle ID [--input FILE]` | 一次生成bundle并采集；完整映射才valid=true，未决映射exit2，保留真实状态 |
+| `finalize --run RUN --owner NAME --input FILE` | 明确验收决定后一次合并/登记/report核验/释放；失败保留占用，输出短摘要，完整结果留文件 |
 | `timing --run RUN [--input FILE]` | 只读区间及宿主计数汇总，不修改历史；未知保留null，重叠时间不重复相加 |
 | `schema --type execution/report_bundle/interrupted_attempt` | 从技能`assets/events.schema.json`输出实际输入形状，无需`--project`；不是输入验证器，不代替运行时来源/审批/证据门禁 |
 | `start --owner NAME [--scopes a,b]` | 获取/恢复唯一兼容未完成run；多个匹配时显式选择。NAME为主任务独有且稳定标识，scope只能取固定范围子集 |
@@ -188,6 +190,8 @@ fully_accepted还必须同时满足：
 - 新run具有绑定完整发现清单的full回归，regression_completeness=complete且整轮绑定checked、原生合并核验通过；没有bundle或只有旧式直接execution时同样执行该门禁。旧run已有bundle时要求整轮绑定checked。
 - 事件只记录主Agent判断，不证明业务语义全覆盖。产品失败可按completed_with_failures结束，不篡改历史结果。
 
+组合入口`attempt-collect`和`finalize`见[本地辅助入口](local-tools.md#确定性批量入口)。前者复用Attempt及collect-results门禁，后者只接受明确的终态决定，连续完成必要离线合并、真实事件登记、报告核验和release；require_full=true时必须完整，fully_accepted的原门禁始终保留。finalize不清理业务资源或假定CLI已退出。正常输出保持精简，完整结果留summary.json；失败保留可恢复状态，不补造证据。
+
 ## 状态与统计
 
 完整status包含planning_needed_scopes、unmapped_requirements、claim、source_checks、residual_resources、global_residual_runs、pending_humans、blocked_cases、regression_ready、regression_inventory、work_needed、nonautomated_cases、next_steps、requirements_updates_paused。brief返回重点数量/ID/原因及历史未检查标记，不展开完整清单。
@@ -276,7 +280,7 @@ plan.cleanup_scan_seconds为扫描耗时；apply的timing.cleanup_scan_seconds�
 
 只读预览/诊断/手工映射时才用：`python3 <skill>/scripts/import_results.py --project PATH --run RUN --bundle BID [--output NEW_FILE]`，API为import_results(project,run_id,bundle_id)。先登记真实bundle，从原JSON生成events/unresolved/counts，不写state；主Agent核实后record提交，输出不覆盖，重入不重复已有绑定。
 
-精确核对文件、标题、project；不同describe同名spec为歧义，不当repeat。Setup、业务、retry/repeat均保留；无依赖证据的skip仍skip，legacy多case/模糊映射留unresolved，不猜notrun或case。正常使用collect-results，不再重复此分步路径。
+精确核对文件、标题、project；不同describe同名spec为歧义，不当repeat。Setup、业务、retry/repeat均保留；无依赖证据的skip仍skip，legacy多case/模糊映射留unresolved，不猜notrun或case。正常使用attempt-collect，已有真实bundle事件时直接collect-results，不再重复此分步路径。
 
 ## 平台与故障边界
 

@@ -1,8 +1,55 @@
 # 本地辅助入口
 
-用于减少临时脚本和字段试错。所有命令经`workflow.py`调用，Python3.10+标准库，无网络访问，不执行产品CLI；`valid=true`只描述该命令的检查结果。原有start/renew/record/collect-results等命令继续可用
+用于减少临时脚本和字段试错。所有命令经`workflow.py`调用，Python3.10+标准库，不执行产品测试；`finalize`可调用已安装的本地Playwright离线合并，禁止下载依赖；`valid=true`只描述该命令的检查结果。原有start/renew/record/collect-results等命令继续可用
 
-指定case复测、只跑自动化及确认来源变更先按[确定性任务](workflow.md#确定性任务直接完成)处理；以下入口用于确需工作流绑定的任务。主Agent或一个低思考等级runner连续调用必要命令，不逐条重新研究字段，不把已有本轮证据另写成多份摘要。
+指定case复测、只跑自动化及确认来源变更先按[确定性任务](workflow.md#确定性任务直接完成)处理；以下入口用于确需工作流绑定的任务。确定性区间在一次宿主调用内连续完成，不为机械步骤派Agent、逐条研究字段或另写多份摘要。组合入口返回成功后直接交付。
+
+## 确定性批量入口
+
+### 一次采集
+
+```sh
+python3 "$WF" attempt-collect --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle "$BUNDLE"
+```
+
+已有真实command.json和JSON/HTML/blob时使用。内部连续执行attempt-bundle→collect-results，复用原门禁，不要求Agent读写中间事件或解析大JSON。返回runner_counts、collection.complete/unresolved和事件路径；映射未完成返回exit2并保留真实已采集状态，不伪造pass，也不自动重跑。相同有效bundle重复采集不重复登记执行。缺产物的真实中断仍走attempt-interrupted，不拿完整采集入口猜结果。
+
+重复执行使用原生JSON采集，保留每个spec/test/result指针和失败历史。导入器支持同一spec下的repeat及声明repeatEach后按spec拆分的重复输出；只有来源位置、suite路径和重复身份均可区分时自动绑定，不由Agent逐条补回执。不同describe中的同名test仍报告歧义。工具问题只修复导入后重用原始产物，不重跑业务或手改JSON。
+
+### 一次收尾
+
+```sh
+python3 "$WF" finalize --project "$PROJECT" --run "$RUN" --owner "$OWNER" --input "$FINALIZE_INPUT"
+```
+
+前置：真实CLI均已结束，配额在teardown后释放，资源核验已有真实回执，实际验收决定已明确。程序核对本run无running任务和active配额，不能自动撤销仍在运行的占用。finalize不删除业务资源、不释放未知CLI的配额、不选择或批准业务预期。输入示例：
+
+```json
+{
+  "acceptance": {
+    "status": "completed_with_failures",
+    "reason": "按本轮真实测试、覆盖缺口和残留证据填写",
+    "evidence": ["test/.cache/runs/<run>/attempts/<bundle>/results/result.json"]
+  },
+  "require_full": true,
+  "events": [],
+  "merge": {
+    "command": ["corepack", "pnpm@<项目现有版本>", "exec", "playwright"],
+    "cwd": ".",
+    "timeout_seconds": 120
+  }
+}
+```
+
+- acceptance.status必须由调用者明确提供真实终态，支持原有fully_accepted/completed_with_failures/partially_blocked/aborted；脚本不把exit0推断为验收。fully_accepted仍经过全部原有覆盖/资源/来源/审批门禁
+- require_full默认true，要求regression_completeness=complete；用户明确限定定向、仅本地受阻收尾等真实范围时填false，并在reason说明。false不放宽fully_accepted门禁，不表示全量通过
+- events可批量带真实resource/issue/merged_report回执；无额外事件用[]或省略。已有登记merge时省略merge；已有真实但未登记merge可在events提供merged_report，不再运行合并。merge与events中的merged_report二选一
+- merge.command是项目已安装的Playwright启动argv，脚本追加merge-reports、固定HTML参数和独立输入目录，shell=false。启动形式限于三种：npx/pnpm/yarn/bunx/corepack开头并以playwright结尾；node加node_modules下Playwright包内的cli.js；直接调用playwright可执行文件且不带参数。拒绝test/install/dlx及-e/--eval/--require/--import等预加载参数。保持项目版本，不自动安装；设置离线环境，将本轮全部已登记blob按bundleID复制并核对摘要，失败批次也包含。每次新合并独立目录，保留旧产物。已登记merge的bundle_ids与当前全部bundle一致时直接交最终report重核；新增CLI后集合不一致，提供merge时重新合并全部blob，未提供则由report核验报错。内容损坏不自动重合并
+- 一次调用完成必要merge→批量record真实事件/终态→一次report及严格一致性核验→检查完整性→release。成功只输出报告路径、结果计数、缺口ID、残留及released=true，完整信息已在summary.json，无需Agent再次遍历。没有任何执行的partially_blocked/aborted可在require_full=false时生成如实报告并释放，不补造一致性或测试通过
+- 报告/完整性失败返回exit2、stage=report_checks、证据入口及released=false，保留占用和原始结果；资源/issue/merge回执与checkpoint原子落盘，验收终态在报告和完整性检查通过后提交，失败保持可继续采集的原状态；同输入恢复不重复记这些事件。成功结果与释放状态一并保存，成功回执丢失后同owner/同输入直接返回replayed=true，不重写报告。修复对应产物/登记后复用输入，不重跑业务测试。未完成的checkpoint可由同一owner提交修订后的输入（如改验收终态或require_full），原输入摘要记入superseded_inputs；已登记的resource/issue/merged_report按事件摘要去重，不重复登记。已成功完成的finalization只接受原输入重放
+- 合并失败保留merge.log和真实command.json，不登记成功、不记录验收终态；进程异常/超时保留现有文件，未取得真实退出码时不造回执。租约/权限错误按原入口处理，不另建run绕过
+
+底层attempt-bundle/collect-results/record/report/release保留用于诊断、真实恢复和特殊兼容；正常路径不与组合入口重复运行。收尾程序完成后直接交付，读完整状态或重建报告只在新的实际异常时进行。
 
 ## 统一预检
 
@@ -100,8 +147,8 @@ python3 "$WF" attempt-init --project "$PROJECT" --run "$RUN" --owner "$OWNER" --
 
 regression_mode与收尾完整性：
 
-- affected为缺省的受影响验证；收尾全量明确填full，绑定当前preflight的完整发现清单、范围和输入指纹，要求非空业务目标且不存在已审核独立test缺席
-- full计划保存全部发现spec（含Setup）、发现JSON的config.configFile及项目根playwright.config.*的SHA-256。config.rootDir小于项目根时默认纳入整棵测试目录树；等于项目根时仅纳入spec、配置及spec父链的fixtures目录。目录遍历排除node_modules、.cache、__pycache__，文件增删也参与比对。可选code_roots字符串数组扩展项目内文件或目录；路径均校验符号链接和越界
+- affected为缺省的受影响验证；收尾全量明确填full，绑定当前preflight的完整发现清单、范围和输入指纹，要求非空业务目标且不存在已审核独立test缺席。full命令不带`--repeat-each`：实际目标会是发现清单的N倍并判incomplete；确需重复执行时用affected，或以相同参数生成发现清单
+- full计划保存全部发现spec（含Setup）、发现JSON的config.configFile及项目根playwright.config.*的SHA-256。config.rootDir小于项目根时默认纳入整棵测试目录树；等于项目根时仅纳入spec、配置及spec父链的fixtures目录。目录遍历排除node_modules、.cache、__pycache__，以及运行期产物目录.auth、test-results、playwright-report、blob-report和发现JSON中各project的outputDir；storageState等写在其他位置的生成文件用可选code_excluded_paths（项目相对路径数组，不能为项目根）声明。文件增删也参与比对。旧计划缺排除字段时按原排除规则比对。可选code_roots字符串数组扩展项目内文件或目录；路径均校验符号链接和越界
 - preflight的coverage_diff及full的attempt-init输出code_roots_suggested、code_references_outside_snapshot和code_import_warnings。递归扫描spec与配置的字面量相对import/export/require，提示范围外依赖、未解析引用和项目外引用；提示不自动扩展指纹或阻断执行。审阅后将需要的code_roots传入full计划。此扫描不是模块解析器，不覆盖别名或动态计算路径
 - 验收与报告重算当前内容，变化标为code_changed_after_full并判incomplete；旧版窄范围指纹或缺指纹标为code_fingerprint_missing，需要新full证明当前代码，原始执行回执仍保留
 - 采集预期与实际的(file,title,project)多重集合，比较缺失/多余目标、Setup和shard。skipped/notrun保留在目标集合中；集合齐全与业务通过分别记录，差集写入summary、Markdown及HTML
@@ -110,13 +157,15 @@ regression_mode与收尾完整性：
 
 单次CLI只收一个有效Playwright blob。每个ZIP必须有可识别的onBlobReportMetadata，额外ZIP、未知格式或shard不符均拒绝；分片各用独立Attempt，command明确声明`--shard=N/T`，JSON和blob中的shard必须一致。全量收尾按同一发现清单、输入及代码指纹汇总全部N=1…T分片的业务集合，每片保留自己的Setup；同一分片重跑使用新bundle ID，汇总采用该分片最新尝试并保留历史记录
 
+以下是诊断/恢复用的底层接口，正常用attempt-collect，无需先调用它：
+
 ```sh
 python3 "$WF" attempt-bundle --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle cli-01
 ```
 
 默认读取command.json，也可用`--input <项目相对回执路径>`，须位于本attempt。核对计划身份、输入指纹、完整命令契约和真实JSON/HTML/blob后，排他生成bundle-event.json，绑定plan路径和摘要并返回collect-results所需路径。新run的计划绑定门禁统一用于record、直接collect、结果导入及后续report重核。存在且内容相同时可复用，内容变化拒绝覆盖；failed/retry全部保留
 
-attempt-init拒绝覆盖已有attempt、越界scope、异常路径和符号链接。中断后保留plan与证据，诊断现有attempt，实际重跑换bundle ID；恢复造成来源marker/输入变化时，先明确审阅其证据归属。正常直接attempt-bundle；只有定位产物问题时用attempt-check，它不生成事件
+attempt-init拒绝覆盖已有attempt、越界scope、异常路径和符号链接。中断后保留plan与证据，诊断现有attempt，实际重跑换bundle ID；恢复造成来源marker/输入变化时，先明确审阅其证据归属。正常直接attempt-collect；只有定位产物问题时用attempt-check，它不生成事件
 
 进程已退出且JSON/HTML/blob不齐的受控中断，用同一plan与真实command.json生成仅回执事件，再按返回的next_command调用record：
 
@@ -124,7 +173,7 @@ attempt-init拒绝覆盖已有attempt、越界scope、异常路径和符号链�
 python3 "$WF" attempt-interrupted --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle cli-01 --reason "<实际中断原因>"
 ```
 
-要求非零整数退出码，或显式exit_code:null；后者用于已确认进程结束但宿主会话结束、外部终止等导致拿不到退出状态的情况，command.json须带reason解释原因，且与--reason一致。起止时间仍需真实有效、计划/命令及文件摘要一致；--input可指定本attempt内的其他真实回执。完整产物继续走attempt-bundle/collect-results。interrupted_attempt单列于state、HTML、Markdown和timing，仅计CLI墙钟，测试时长保持null，不进入业务结果、full完整性或原生merge输入。未知退出码在机器数据保留null、可读报告显示unknown。计划和命令回执持续保留，资源恢复及配额释放仍依据实际状态；未观察到进程退出时先保留issue及现有证据，不造结束时间或退出码
+要求非零整数退出码，或显式exit_code:null；后者用于已确认进程结束但宿主会话结束、外部终止等导致拿不到退出状态的情况，command.json须带reason解释原因，且与--reason一致。起止时间仍需真实有效、计划/命令及文件摘要一致；--input可指定本attempt内的其他真实回执。完整产物继续走attempt-collect。interrupted_attempt单列于state、HTML、Markdown和timing，仅计CLI墙钟，测试时长保持null，不进入业务结果、full完整性或原生merge输入。未知退出码在机器数据保留null、可读报告显示unknown。计划和命令回执持续保留，资源恢复及配额释放仍依据实际状态；未观察到进程退出时先保留issue及现有证据，不造结束时间或退出码
 
 ## 只读耗时汇总
 

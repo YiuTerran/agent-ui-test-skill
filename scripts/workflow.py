@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local, evidence-indexed E2E workflow recorder. No external execution."""
+"""Evidence-indexed E2E recorder; finalize may run local offline report merge, never tests."""
 import argparse
 import copy
 from contextlib import contextmanager
@@ -1449,9 +1449,80 @@ def event_schema(event_type):
     return {'$schema': document['$schema'], **document['$defs'][event_type]}
 
 
+def write_report(project, state, spec, cov, persist_state=True):
+    directory = run_path(project, state['run_id'])
+    path = directory / 'state.json'
+    report_started = now()
+    recycled_paths = report_recycled_paths(project, state)
+    result = summary(project, state, spec, cov, recycled_paths)
+    atomic(directory / 'report.html', report_artifacts.review_html(
+        project, state, result['report_consistency']))
+    lines = ['# E2E Run ' + state['run_id'], '', 'Acceptance: ' + state['acceptance'],
+             '', '报告一致性：' + result['report_consistency']['status'], '']
+    lines += ['[本轮HTML入口：未通过优先](<' + str(directory / 'report.html') + '>)', '']
+    if result['report_paths']['merged_html']:
+        lines += ['[合并的Playwright原生HTML](<' + str(safe_path(
+            project, result['report_paths']['merged_html'])) + '>)', '']
+    for bid, bundle in result['report_bundles'].items():
+        raw = str(safe_path(project, bundle['execution_result']))
+        raw_label = ('原始JSON已按保留策略回收：' + raw if bundle['execution_result'] in recycled_paths
+                     else '[原始JSON](<' + raw + '>)')
+        lines += ['- ' + bid + '：' + raw_label + '；HTML来源：' + bundle['html_origin']]
+        if bundle.get('html_report'):
+            html_path = bundle['html_report']
+            lines += [('  - HTML报告已按保留策略回收：' + html_path if html_path in recycled_paths
+                       else '  - [HTML报告](<' + str(safe_path(project, html_path)) + '>)')]
+        if bundle.get('rebuild_note'):
+            lines += ['  - 重建说明：' + bundle['rebuild_note']]
+    lines += ['- ' + error for error in result['report_consistency']['errors']]
+    lines += ['', '## 自动化新增范围', '', '```json',
+              json.dumps(result['automation_expansion'], ensure_ascii=False, indent=2), '```']
+    lines += ['', '## 收尾全量目标集合', '', '```json',
+              json.dumps(result['regression_completeness'], ensure_ascii=False, indent=2), '```']
+    lines += ['', '## 中断调用（仅回执）', '',
+              '以下调用仅计入CLI墙钟，不计测试结果或全量完整性；资源状态另行核实。', '']
+    for bid, attempt in result['interrupted_attempts'].items():
+        lines += ['- ' + bid + ': ' + attempt['started_at'] + ' → ' + attempt['ended_at']
+                  + '; exit=' + str('unknown' if attempt['exit_code'] is None else attempt['exit_code']) + '; ' + attempt['reason']
+                  + '；[命令回执](<' + str(safe_path(project, attempt['command_receipt'])) + '>)']
+    lines += failure_markdown(state, cov, project, recycled_paths)
+    lines += ['', '## Counts', '', '```json', json.dumps(result['counts'], indent=2), '```', '', '## Timing and Usage', '',
+              '报告生成完成采样在本正文写出后记录，见summary.json的report_generation；此处timing为汇总取样口径。', '',
+              '```json', json.dumps({'timing': result['timing'], 'usage': result['usage']}, indent=2), '```', '', '## Cases', '']
+    lines += ['| Case | Result | Code Coverage | Plan | Exploration | Code |', '| --- | --- | --- | --- | --- | --- |']
+    for cid, data in result['cases'].items():
+        action = data['action'] or {}
+        cells = [cid, data['result'], str(data['covered']), action.get('action', 'unrecorded'), action.get('exploration_action', 'unrecorded'), action.get('code_action', 'unrecorded')]
+        lines.append('| ' + ' | '.join(str(c).replace('|', '\\|').replace('\n', ' ') for c in cells) + ' |')
+    lines += ['', '## Per-Case Executions', '']
+    for cid, data in result['cases'].items():
+        action = data['action'] or {}
+        lines += ['- ' + cid + ': result=' + data['result'] + '; covered=' + str(data['covered'])
+                  + '; plan=' + action.get('action', 'unrecorded')
+                  + '; exploration=' + action.get('exploration_action', 'unrecorded')
+                  + '; code=' + action.get('code_action', 'unrecorded')]
+        lines += ['  - execution=' + e['execution_id'] + '; test=' + e['test_id'] + '; attempt=' + str(e['attempt']) + '; result=' + e['result'] for e in data['executions']]
+    lines += ['', '## Setup Executions', '']
+    lines += ['- ' + e['execution_id'] + ': test=' + e['test_id'] + '; attempt=' + str(e['attempt']) + '; result=' + e['result'] for e in state['executions'] if e['setup']]
+    lines += ['', '## Issues', '']
+    lines += ['- ' + key + ': kind=' + value['kind'] + '; affected=' + ','.join(value.get('affected_case_ids', [])) for key, value in state['issues'].items()]
+    lines += ['', '## Resources and Evidence', '', '```json', json.dumps({'resources': result['resources'], 'evidence': result['evidence']}, indent=2), '```', '', 'File existence and state constraints do not prove semantic coverage.']
+    atomic(directory / 'report.md', '\n'.join(lines) + '\n')
+    state['claim']['renewed_at'] = now()
+    if persist_state:
+        atomic(path, state)
+    report_completed = now()
+    result['report_generation'] = {
+        'started_at': report_started, 'completed_at': report_completed,
+        'wall_seconds': (dt(report_completed) - dt(report_started)).total_seconds(),
+        'boundary': 'report bodies and renewed state written; before final summary write and stdout'}
+    atomic(directory / 'summary.json', result)
+    return result
+
+
 def main(argv=None):
     parser = JsonArgumentParser(description=__doc__)
-    helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'attempt-interrupted', 'timing'}
+    helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'attempt-interrupted', 'attempt-collect', 'finalize', 'timing'}
     parser.add_argument('command', choices=['doctor', 'schema', 'init', 'start', 'renew', 'prepare-regression', 'collect-results', 'record', 'status', 'validate', 'report', 'release', *sorted(helpers)])
     parser.add_argument('--project')
     parser.add_argument('--type', dest='event_type')
@@ -1484,7 +1555,8 @@ def main(argv=None):
         check(project.is_dir(), 'project directory does not exist')
         if args.command in helpers:
             helper_spec = importlib.util.spec_from_file_location(
-                'e2e_workflow_tools', Path(__file__).with_name('workflow_tools.py'))
+                'e2e_workflow_tools', Path(__file__).with_name(
+                    'workflow_batch.py' if args.command in {'attempt-collect', 'finalize'} else 'workflow_tools.py'))
             helper = importlib.util.module_from_spec(helper_spec)
             helper_spec.loader.exec_module(helper)
             result = helper.dispatch(globals(), project, args)
@@ -1610,70 +1682,7 @@ def main(argv=None):
                         result = {'valid': not errors, 'errors': errors, 'report_consistency': consistency,
                                   'status': status(project, state, spec, cov)}
                     else:
-                        report_started = now()
-                        recycled_paths = report_recycled_paths(project, state)
-                        result = summary(project, state, spec, cov, recycled_paths)
-                        atomic(directory / 'report.html', report_artifacts.review_html(
-                            project, state, result['report_consistency']))
-                        lines = ['# E2E Run ' + state['run_id'], '', 'Acceptance: ' + state['acceptance'],
-                                 '', '报告一致性：' + result['report_consistency']['status'], '']
-                        lines += ['[本轮HTML入口：未通过优先](<' + str(directory / 'report.html') + '>)', '']
-                        if result['report_paths']['merged_html']:
-                            lines += ['[合并的Playwright原生HTML](<' + str(safe_path(
-                                project, result['report_paths']['merged_html'])) + '>)', '']
-                        for bid, bundle in result['report_bundles'].items():
-                            raw = str(safe_path(project, bundle['execution_result']))
-                            raw_label = ('原始JSON已按保留策略回收：' + raw if bundle['execution_result'] in recycled_paths
-                                         else '[原始JSON](<' + raw + '>)')
-                            lines += ['- ' + bid + '：' + raw_label + '；HTML来源：' + bundle['html_origin']]
-                            if bundle.get('html_report'):
-                                html_path = bundle['html_report']
-                                lines += [('  - HTML报告已按保留策略回收：' + html_path if html_path in recycled_paths
-                                           else '  - [HTML报告](<' + str(safe_path(project, html_path)) + '>)')]
-                            if bundle.get('rebuild_note'):
-                                lines += ['  - 重建说明：' + bundle['rebuild_note']]
-                        lines += ['- ' + error for error in result['report_consistency']['errors']]
-                        lines += ['', '## 自动化新增范围', '', '```json',
-                                  json.dumps(result['automation_expansion'], ensure_ascii=False, indent=2), '```']
-                        lines += ['', '## 收尾全量目标集合', '', '```json',
-                                  json.dumps(result['regression_completeness'], ensure_ascii=False, indent=2), '```']
-                        lines += ['', '## 中断调用（仅回执）', '',
-                                  '以下调用仅计入CLI墙钟，不计测试结果或全量完整性；资源状态另行核实。', '']
-                        for bid, attempt in result['interrupted_attempts'].items():
-                            lines += ['- ' + bid + ': ' + attempt['started_at'] + ' → ' + attempt['ended_at']
-                                      + '; exit=' + str('unknown' if attempt['exit_code'] is None else attempt['exit_code']) + '; ' + attempt['reason']
-                                      + '；[命令回执](<' + str(safe_path(project, attempt['command_receipt'])) + '>)']
-                        lines += failure_markdown(state, cov, project, recycled_paths)
-                        lines += ['', '## Counts', '', '```json', json.dumps(result['counts'], indent=2), '```', '', '## Timing and Usage', '',
-                                  '报告生成完成采样在本正文写出后记录，见summary.json的report_generation；此处timing为汇总取样口径。', '',
-                                  '```json', json.dumps({'timing': result['timing'], 'usage': result['usage']}, indent=2), '```', '', '## Cases', '']
-                        lines += ['| Case | Result | Code Coverage | Plan | Exploration | Code |', '| --- | --- | --- | --- | --- | --- |']
-                        for cid, data in result['cases'].items():
-                            action = data['action'] or {}
-                            cells = [cid, data['result'], str(data['covered']), action.get('action', 'unrecorded'), action.get('exploration_action', 'unrecorded'), action.get('code_action', 'unrecorded')]
-                            lines.append('| ' + ' | '.join(str(c).replace('|', '\\|').replace('\n', ' ') for c in cells) + ' |')
-                        lines += ['', '## Per-Case Executions', '']
-                        for cid, data in result['cases'].items():
-                            action = data['action'] or {}
-                            lines += ['- ' + cid + ': result=' + data['result'] + '; covered=' + str(data['covered'])
-                                      + '; plan=' + action.get('action', 'unrecorded')
-                                      + '; exploration=' + action.get('exploration_action', 'unrecorded')
-                                      + '; code=' + action.get('code_action', 'unrecorded')]
-                            lines += ['  - execution=' + e['execution_id'] + '; test=' + e['test_id'] + '; attempt=' + str(e['attempt']) + '; result=' + e['result'] for e in data['executions']]
-                        lines += ['', '## Setup Executions', '']
-                        lines += ['- ' + e['execution_id'] + ': test=' + e['test_id'] + '; attempt=' + str(e['attempt']) + '; result=' + e['result'] for e in state['executions'] if e['setup']]
-                        lines += ['', '## Issues', '']
-                        lines += ['- ' + key + ': kind=' + value['kind'] + '; affected=' + ','.join(value.get('affected_case_ids', [])) for key, value in state['issues'].items()]
-                        lines += ['', '## Resources and Evidence', '', '```json', json.dumps({'resources': result['resources'], 'evidence': result['evidence']}, indent=2), '```', '', 'File existence and state constraints do not prove semantic coverage.']
-                        atomic(directory / 'report.md', '\n'.join(lines) + '\n')
-                        state['claim']['renewed_at'] = now()
-                        atomic(path, state)
-                        report_completed = now()
-                        result['report_generation'] = {
-                            'started_at': report_started, 'completed_at': report_completed,
-                            'wall_seconds': (dt(report_completed) - dt(report_started)).total_seconds(),
-                            'boundary': 'report bodies and renewed state written; before final summary write and stdout'}
-                        atomic(directory / 'summary.json', result)
+                        result = write_report(project, state, spec, cov)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 2 if result.get('valid') is False or result.get('report_consistency', {}).get('status') == 'failed' else 0
     except (ValueError, KeyError, TypeError, AttributeError, IndexError, OSError) as error:

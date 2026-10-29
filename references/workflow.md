@@ -9,7 +9,7 @@
 ### 已有自动化复测
 
 1. **锁定输入**：目标由用户指定，或从最近一份相关报告提取最终失败项；已给ID时无需再遍历历史run。一次核实项目命令、目标spec、认证及数据夹具的必要运行条件。沿用当前代码，不改断言、覆盖映射、需求版本或产品代码。
-2. **一次发现并执行**：使用同一组spec/project/grep选择条件运行一次`--list`，核对业务目标集合及实际Setup。`--grep`匹配包含文件和project的完整测试名；caseID转义并限定结束分隔符，不在caseID前误加开头锚点。零目标、漏项或多选时只修正选择条件；匹配后立即执行，保留Setup依赖。目标为`SP-01.1`和`SP-02`时，例如`--grep '(SP-01\.1|SP-02)(｜|$)'`，分隔符以实际项目为准。
+2. **一次发现并执行**：使用同一组spec/project/grep选择条件运行一次`--list`，核对业务目标集合及实际Setup。`--grep`匹配包含文件和project的完整测试名；caseID转义并限定结束分隔符，不在caseID前误加开头锚点。零目标、漏项或多选时只修正选择条件；匹配后立即执行，保留Setup依赖。目标为`SP-01.1`和`SP-02`、标题以空格分隔caseID时，例如`--grep '(SP-01\.1|SP-02)( |$)'`，分隔符以实际项目为准。
 3. **连续完成机械步骤**：优先沿用项目runner；一次设置独立JSON/HTML/blob及输出目录、必要资源绑定和配额，真实CLI结束后完成teardown、资源核对及配额释放。夹具需要run/owner等输入时复用有效真实绑定，或一次准备必要绑定；不伪造ID、审核或来源观察。执行期间冻结计划和映射，已有活跃进程先接回会话，不重复启动。
 4. **结果就绪即交付**：核对退出码、逐case结果、重试、未执行和清理状态，交付原生报告路径，分别说明整轮等待与CLI时长。单次原生HTML可直接交付；工作流多bundle按既有契约合并。没有本轮来源核验时，结论限定为当前代码的复测结果。
 
@@ -19,15 +19,19 @@
 
 按所指来源复用既有读取工具，一次取得当前版本及可靠内容指纹，与同口径基线比较。版本变化不等于业务语义变化；指纹不同则定位相关内容差异，缺基线或不可读则说明无法确认。交付比较结果后结束，不自动启动浏览器、测试、审批或覆盖补全。认证失败按实际来源技能处理，只阻塞依赖该来源的任务。
 
-### 可选低思考等级runner
+### 程序接管确定性区间
 
-主Agent决定范围和完成条件，宿主支持时以`reasoning_effort=low`或等效参数启动一个runner，使用最小上下文而非整段历史，不强制切换模型。短命令直接执行可省去委派成本。直接传入项目绝对路径、caseID/spec、完整argv、一次发现命令、环境及认证引用、输出目录、真实资源绑定、配额和数据边界即可；凭据值不进入消息，不另写重复交接文档。
+项目runner优先，其次在一次宿主调用中用安全argv和结构化JSON串接已有命令；不为执行固定命令新增Agent或交接文件。主Agent只提供项目路径、目标、已确定的运行条件、完成标准和授权边界。程序连续完成一次发现→准备/环境检查→领取配额→真实CLI→teardown/缺席核验→释放配额→采集→收尾。正常只返回计数、差异、产物入口和释放结果。
 
-runner连续完成发现→真实执行→teardown→结果与资源核对→释放配额，返回退出码、逐case结果、产物路径、耗时和残留。发现目标集合不符时只校正选择器；认证/网络/权限阻塞、资源所有权不明或清理异常时保留证据并交回主Agent，不自行改代码、扩范围或盲目重试。主Agent不重复执行、不更改runner输入，收到真实异常后只处理对应问题。
+一次执行中先验证所有必需环境变量，包括夹具的run/owner/marker/attempt目录，使用实际接管输出，不能猜默认值；配额`writable_paths`用项目相对路径，owner_pid绑定实际存活的runner进程（Python runner用`os.getpid()`，有意绑定其父进程时用`os.getppid()`，不依赖shell的PPID环境变量）。配额拒绝、身份失效或清理异常时停止相关启动并保留真实状态，不盲目继续。
+
+同一项目后续批次复用已验证的runner及结构化输入，只调整目标、bundle和实际配额，不逐轮生成临时执行脚本或重新研究字段。新增路径的代表验证也先用真实选择参数发现目标；该过滤清单用于定向执行，不能替代收尾full所需的未过滤完整发现。探索占用在任务完成并清理后释放；仍需并行探索时按实际总预算为CLI留出workers，配额拒绝仅诊断一次真实持有者，不盲目重试或撤销活跃租约。
+
+工具返回会话句柄时等待同一程序，不拆出新run或重复启动；使用能保持进度沟通的等待窗口。资源状态与teardown由夹具/项目适配器产生真实回执，未知创建结果交Agent处理，脚本不猜测删除。收到正常完成摘要立即交付，只有新的实际错误才读相应日志。
 
 ## 最小命令顺序
 
-以下顺序用于需要工作流绑定或需求验收的真实E2E；确定性请求先走[直接完成](#确定性任务直接完成)。已有回归复用有效输入，明确只回归时直接登记跳过新增；仅本地修复见[快车道](#按报告修复快车道)。旧start/renew路径继续可用，已有就绪输入不重复预检。实际CLI/merge不是workflow代跑。
+以下是runner内部动作清单，应合成连续程序调用，不按行返回Agent。用于需要工作流绑定或需求验收的真实E2E；确定性请求先走[直接完成](#确定性任务直接完成)。已有回归复用有效输入，明确只回归时直接登记跳过新增；仅本地修复见[快车道](#按报告修复快车道)。旧start/renew路径继续可用，已有就绪输入不重复预检。实际CLI/merge不是workflow代跑。
 
 `WF/SCHED`分别为技能scripts/workflow.py、scripts/scheduling.py路径，`PROJECT/OWNER`取真实项目和主任务标识，`RUN`取start返回值。`SOURCE_EVENTS/BUNDLE_EVENT/FINAL_EVENTS`按真实来源/审批、CLI产物、合并/验收写出，init不创建。`QUOTA_REQUEST`按[配额契约](contracts.md#双预算与就绪任务)声明实际读写集/workers；`QUOTA_RESULT`保存在忽略的缓存内，`RELEASE_REQUEST`取该结果lease中的lease_id/release_token。其余输入见[工作流](#输入准备与命令边界)。每步成功再继续，收集成功不等于测试通过。
 
@@ -47,13 +51,10 @@ python3 "$SCHED" acquire --project "$PROJECT" --input "$QUOTA_REQUEST" > "$QUOTA
 # 核实acquired=true，应用attempt-init输出参数，实际运行CLI；即使失败也teardown
 # 保存实际argv/起止/退出码到该attempt的command.json；从领取结果提取RELEASE_REQUEST
 python3 "$SCHED" release --project "$PROJECT" --input "$RELEASE_REQUEST"
-python3 "$WF" attempt-bundle --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle "$BUNDLE"
-# BUNDLE_EVENT取attempt-bundle返回的input路径
-python3 "$WF" collect-results --project "$PROJECT" --run "$RUN" --owner "$OWNER" --input "$BUNDLE_EVENT"
-# 每CLI分别收集；全部完成后实际merge，写含merged_report及真实acceptance的FINAL_EVENTS
-python3 "$WF" record --project "$PROJECT" --run "$RUN" --owner "$OWNER" --input "$FINAL_EVENTS"
-python3 "$WF" report --project "$PROJECT" --run "$RUN" --owner "$OWNER"
-python3 "$WF" release --project "$PROJECT" --run "$RUN" --owner "$OWNER"
+# 从真实command.json及JSON/HTML/blob一次生成并采集，失败保留原始证据
+python3 "$WF" attempt-collect --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle "$BUNDLE"
+# 所有CLI已结束、配额已释放、资源已核对后，输入真实验收决定；一次收尾并直接交付
+python3 "$WF" finalize --project "$PROJECT" --run "$RUN" --owner "$OWNER" --input "$FINALIZE_INPUT"
 ```
 
 ### 输入准备与命令边界
@@ -63,8 +64,8 @@ python3 "$WF" release --project "$PROJECT" --run "$RUN" --owner "$OWNER"
 - **新增范围**：新增覆盖时将模块缺口清单交给用户选择，用automation_expansion登记真实答复、完整非空清单和范围。明确只回归则保存用户原话与跳过新增决定，不重复征询；完整清单就绪才登记skip事件，无缺口不造事件。清单待核实不阻挡已有合格测试执行，也不以部分清单冒充完整清单或新增授权；完整回归收尾仍核对实际发现。
 - **探索/代码**：在获准范围内补独立测试与真实认证/数据fixture，以case事件更新coverage和完成状态；待选择或未获选的缺口保持待补，已有合格测试继续回归。
 - **实际CLI**：先prepare-regression、领取真实workers配额，再运行spec批准的项目命令。每次独立attempt目录，用JSON/HTML/blob reporters及输出目录参数（详见[报告](reports.md#每次命令独立保存)）；记录真实起止/退出码，失败也teardown、核对资源和释放配额。
-- **BUNDLE_EVENT**：将该CLI真实JSON/HTML/ZIP路径、命令、环境、scope和Setup名称写为report_bundle，立即collect-results。多CLI换bundle_id分别收集；核实complete/unresolved，不为修复登记错误重跑测试。
-- **FINAL_EVENTS**：全部CLI收集后，按[原生合并步骤](reports.md#最终合并与未通过优先)复制本轮全部ZIP、核对摘要并实际merge；成功后写merged_report与基于证据的acceptance数组，再report→release。新增CLI须重合并；无可执行目标只记阻塞，不造空bundle。
+- **结果采集**：真实回执就绪即调用attempt-collect，程序内部生成bundle并走collect-results原有门禁；多CLI换bundle_id分别采集。complete/unresolved由程序核对，不为登记问题重跑测试。
+- **FINALIZE_INPUT**：使用[批量入口](local-tools.md#确定性批量入口)的结构化输入，声明实际验收终态及full/定向完成标准，附真实资源/issue回执；需要合并时提供项目本地Playwright启动argv，已有有效merge复用。finalize内部依次合并、登记、report核验、release，返回成功摘要后不再检查同一批证据。无目标以明确阻塞终态关闭，不造空bundle。
 
 首次来源/审批事件形状示例（所有ID、版本、marker和路径须取真实值；示例文件不由init创建，也不代替审批）：
 
@@ -113,21 +114,21 @@ python3 "$WF" release --project "$PROJECT" --run "$RUN" --owner "$OWNER"
 4. 将用户答复原话、清单、所选模块与未选缺口写入同一份证据，通过automation_expansion登记。每个获选模块就绪后连续推进ego-browser探索→独立Playwright代码→fixture→受影响验证；同一探索者写代码。按独立写集并行，同文件互斥，已有合格case可同步回归。清单外新增缺口再次确认；所选范围内的既有授权持续有效。
 5. 新增路径默认收尾全量现有自动化；用户限定定向复测时按指定目标交付，不扩大执行范围或声称完整验收。精确报告本轮选择和剩余缺口，长期coverage保留真实状态；现有自动化通过与需求全覆盖分别表述。脚本核对的是本地登记与范围，执行者须在新增场景代码、派发新增任务或对应浏览器探索之前落实用户选择。
 
-新探索首个代表流程用独立数据执行两次且分别验证清理；稳定回归通常一次。每case最多两次针对已证明测试代码缺陷的修复，不改预期或吞异常制造通过。产品差异、环境/认证失败、真机缺失各自留因，业务代码修复另行授权。
+新增共享fixture或复杂交互时，先完成最小代表流程的代码、必要映射和安全夹具，立即定向验证创建、交互、持久化及清理，再扩展同类case。代表流程默认一次；新fixture涉及唯一约束或逆依赖清理时默认用独立数据跑两次，以暴露重复创建和清理残留。有真实竞态证据、修复影响或用户要求稳定性验证时，才追加受影响目标的验证，使用独立数据并分别核验清理。不要把`--repeat-each`作为固定前置；稳定且输入未变时不重复代表轮。每case最多两次针对已证明测试代码缺陷的修复，不改预期或吞异常制造通过。产品差异、环境/认证失败、真机缺失各自留因，业务代码修复另行授权。
 
 ### 稳定回归与探索重叠
 
-首个获准新增的模块就绪即探索/编码，有效稳定case就绪即回归。新增任务以用户选择的清单和范围为前置；既有合格回归可与缺口盘点或选择等待并行。该流程实际来源、预期审批、身份、fixture和资源安全条件继续核验；报告清理是对应CLI前置，不阻挡无关只读页面探索。执行读集包含传递fixture/辅助代码/配置/认证输入，与探索写集冲突时只串行相关任务。
+首个获准新增的模块就绪即探索/编码，首个代表case按[上节](#覆盖缺口门禁与模块补全)定向验证。其他独立写集继续探索/编码；共享fixture尚在修改时先冻结该依赖及代表spec，或使用明确隔离的工作副本，不能一边改同一读集一边运行。新增任务以用户选择的清单和范围为前置；既有合格回归可与缺口盘点或选择等待并行。该流程实际来源、预期审批、身份、fixture和资源安全条件继续核验；报告清理是对应CLI前置，不阻挡无关只读页面探索。执行读集包含传递fixture/辅助代码/配置/认证输入，与探索写集冲突时只串行相关任务。
 
-## 程序化快车道（SHOULD）
+## 程序化快车道（MUST）
 
-来源快检、清理、配额、绑定及报告批量直接完成，或交给一个低思考等级runner连续执行；不按步骤拆Agent或写重复摘要。确定性任务沿用直接完成路径，不用反复前置检查替代执行。连续3次冗余、非业务本地调用均未推进任何已就绪工作时停止重复协调，转向就绪任务或已知阻塞；必要init/来源/清理/有效诊断不计入。无需新增汇报/计时墙，不能据此跳安全检查或强杀清理。
+按[入口的执行效率约束](../SKILL.md#执行效率should)组织整轮：Agent处理不确定性，程序处理已确定步骤。每个连续机械区间一次调用，不逐步计划、汇报、派Agent、轮询或读回大对象。底层命令是组合入口的实现/诊断接口，不能与组合入口重复执行。
 
-- **复用**：preflight汇总已有真实观察/发现及模块差集；未提供项保持unknown，外部补齐后直接record对应事件，不重复本地盘点。record/collect默认简报足够接下一步，--full只在需要清单/全局诊断时使用。简报global_residuals_checked=false不是无残留。
-- **清理**：首次回归一次prepare-regression，后续复用；扩scope补范围。异常一次定位，输入未变不重复调用/现场改工具，相关范围等待、独立工作继续。
-- **配额/租约**：实际浏览器/CLI前acquire，不先重复budget/ready；teardown后release。由上次claim判断租约，预计长操作超期才renew；等待不超过剩余租期一半，真过期才恢复。具体冲突/资源/旧租期见契约。
-- **收尾**：attempt-bundle从真实command.json和原生报告生成标准事件，每CLI立即collect-results，不再重复import/validate。validate-input、attempt-check仅在新字段或诊断时使用；全部完成一次merge、登记验收、report。有差异才定点核对，不重复同输入试错。
-- **沟通**：新增覆盖且无有效选择时征询范围；明确只回归不再征询。其他决定围绕真实歧义、审批范围或新高风险写操作。必要人工等待立即持久化并通知，机械状态不逐阶段汇报。
+- **接管/来源/差集**：必要读取合批；preflight汇总现有真实观察和发现，来源正文只在缺失或可靠指纹变化时加载。没有新输入不重复盘点，版本/指纹比较由程序完成，语义变化才交Agent。
+- **准备/执行**：首次prepare-regression，后续复用；项目runner一次设置环境/资源绑定、领取真实配额、CLI、teardown/核验及释放。必要的初始化和配置读取放同一程序，启动前缺项立即停止，不能先失败一轮才补环境。
+- **采集/收尾**：每次CLI只用attempt-collect；全部CLI完成只用finalize。原始失败和重试保留在同一次合并中，完整性与通过率分别检查，验收决定不能由“exit0”猜出。
+- **恢复**：优先接回真实进程/已完成checkpoint；报告或登记错误使用原始产物定点修复，不重跑业务。组合入口失败时只读其指定证据，不重新遍历全部来源、用例、附件和历史run。
+- **交付**：成功摘要足够答复，不再status/validate/逐case或资源扫描；详细证据在报告内。真实业务异常或新增范围交用户/Agent，其余机械步骤连续完成。
 
 ## 并行和数据边界（MUST）
 
