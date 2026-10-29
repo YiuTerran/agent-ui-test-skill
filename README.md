@@ -52,7 +52,7 @@ git clone https://github.com/YiuTerran/agent-ui-test-skill.git \
 
 建议在目标**前端工程目录**调用本技能，让Agent按[首次接入引导](references/onboarding.md)识别工程、补齐配置并检查依赖。monorepo沿用实际E2E工作区；纯黑盒项目也可使用独立测试工程。
 
-Agent会引导提供需求文档地址/文件、测试环境、身份和数据边界，并按需询问后端代码库路径；WPS资料工具仅在读取相应来源时需要。缺少Playwright、浏览器或ego-lite等依赖时会提示安装与验证，不自动下载或登录。随后梳理需求、请用户选择首轮范围，先跑通一个代表流程及清理，再扩展用例。
+Agent会引导提供需求文档地址/文件、测试环境、身份和数据边界，并按需询问后端代码库路径；WPS资料工具仅在读取相应来源时需要，详见[WPS 365 插件仓库](https://github.com/YiuTerran/dsh-wps365-plugin)。缺少Playwright、浏览器或ego-lite等依赖时会提示安装与验证，不自动下载或登录。随后梳理需求、请用户选择首轮范围，先跑通一个代表流程及清理，再扩展用例。
 
 以下为 POSIX shell 示例；Windows 使用 `py -3` 和对应的 PowerShell 路径语法。
 
