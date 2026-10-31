@@ -30,8 +30,6 @@ def file_lock(fd, timeout=120):
     """Lock a stable file, never the JSON inode replaced by atomic writes."""
     if WINDOWS:
         import msvcrt
-        if os.fstat(fd).st_size == 0:
-            os.write(fd, b'\0')
         deadline = time.monotonic() + timeout
         while True:
             os.lseek(fd, 0, os.SEEK_SET)
@@ -45,6 +43,9 @@ def file_lock(fd, timeout=120):
                     raise TimeoutError('timed out waiting for local workflow lock') from error
                 time.sleep(.05)
         try:
+            # Windows can lock beyond EOF; initialize only while owning the byte.
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b'\0')
             yield
         finally:
             os.lseek(fd, 0, os.SEEK_SET)

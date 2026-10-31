@@ -57,6 +57,21 @@ class PlatformTest(unittest.TestCase):
                     with p.file_lock(stream.fileno(), timeout=0):
                         self.fail('must not acquire')
 
+    def test_windows_lock_initializes_after_acquisition_and_releases_on_write_error(self):
+        calls = []
+        fake = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0,
+                                     locking=lambda fd, mode, count: calls.append(mode))
+        def denied_write(fd, data):
+            self.assertEqual([fake.LK_NBLCK], calls)
+            raise PermissionError(errno.EACCES, 'initialization denied')
+        with tempfile.TemporaryFile('w+b') as stream, \
+                mock.patch.object(p, 'WINDOWS', True), mock.patch.dict(sys.modules, msvcrt=fake), \
+                mock.patch.object(p.os, 'write', side_effect=denied_write):
+            with self.assertRaises(PermissionError):
+                with p.file_lock(stream.fileno()):
+                    self.fail('failed initialization must not enter protected work')
+        self.assertEqual([fake.LK_NBLCK, fake.LK_UNLCK], calls)
+
     def test_windows_directory_sync_never_uses_unsupported_directory_open(self):
         with mock.patch.object(p, 'WINDOWS', True), mock.patch.object(p.os, 'open') as opened:
             p.sync_directory('unused')
@@ -227,6 +242,22 @@ class NativeWindowsTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.files = p.WindowsFiles()
+
+    def test_empty_lock_contention_waits_before_initializing(self):
+        import msvcrt
+        lock = self.root / 'empty.lock'
+        with lock.open('a+b') as owner, lock.open('a+b') as contender:
+            msvcrt.locking(owner.fileno(), msvcrt.LK_NBLCK, 1)
+            try:
+                with self.assertRaises(TimeoutError):
+                    with p.file_lock(contender.fileno(), timeout=0):
+                        self.fail('contender must not acquire the locked byte')
+                self.assertEqual(0, lock.stat().st_size)
+            finally:
+                os.lseek(owner.fileno(), 0, os.SEEK_SET)
+                msvcrt.locking(owner.fileno(), msvcrt.LK_UNLCK, 1)
+            with p.file_lock(contender.fileno(), timeout=1):
+                self.assertEqual(1, lock.stat().st_size)
 
     def test_pinned_parent_cannot_be_renamed(self):
         directory = self.root / 'pinned'
