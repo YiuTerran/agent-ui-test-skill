@@ -114,11 +114,45 @@ checkpoint始终输出`formal_regression_completeness=not_evaluated`。它解决
 
 ```sh
 python3 "$SKILL/scripts/work_packages.py" --project "$PROJECT" \
-  --input "$NORMALIZED" --output test/.cache/work-packages-v1.json
+  --input "$NORMALIZED" --output test/.cache/work-packages-v2.json
 ```
 
 每项必填`case_id/category/evidence`，可带`root_cause_id/component/repair_attempts/confirmation_attempts/permission_required/cleanup_unknown/environment_changed`。category支持`product_candidate/needs_decision/environment/script/condition_missing/api_exclusive/deferred/unbound_observation/cleanup_unknown`。evidence是已有项目相对文件路径，复杂原ID或证据指针由项目adapter另存索引，不存凭据
 
-仅明确根因按root_cause_id合并；component聚类标为`component_triage_only`，不推断共同bug。主action区分授权、清理、测试修复、环境诊断/恢复、产品分诊、API移交与暂缓；`constraints_by_case`保留其他门禁及历史次数。`repair_attempts/confirmation_attempts`可缺省，只用于记录，不产生次数门禁。环境问题明确`environment_changed:false`表示相关故障条件未变，应等待恢复；true或缺省时先诊断当前依赖，不凭历史确认次数推断环境不可用或允许重跑。输出不重试、不改历史、不解锁、不改变覆盖或验收；相同输出仅允许同内容幂等重放
+仅明确根因按root_cause_id合并；component聚类标为`component_triage_only`，不推断共同bug。`constraints_by_case`保留其他门禁及历史次数。`repair_attempts/confirmation_attempts`可缺省，只用于记录，不产生次数门禁。输出不重试、不改历史、不解锁、不改变覆盖或验收；相同输出仅允许同内容幂等重放
+
+### 输出action与runner路由
+
+`category`是输入分类，枚举保持不变；以下是输出`packages[].action`。runner先检查顶层`schema_version`，当前为`2`；不支持的版本或未知action停止自动派发并报告，不回退到执行测试。权限和清理门禁优先于category路由。
+
+| 条件（按优先级） | 输出action | runner下一步 |
+| --- | --- | --- |
+| `permission_required:true` | `awaiting_authorization` | 等待相应授权 |
+| `cleanup_unknown:true`或category为`cleanup_unknown` | `cleanup_review_no_blind_retry` | 核清资源和清理义务 |
+| category为`script` | `repair_then_affected` | 诊断并修复已授权的测试问题，验证受影响目标 |
+| category为`environment`，缺省`environment_changed` | `review_environment_state` | 状态未知；只读核实相关故障条件，不启动确认复跑 |
+| category为`environment`，`environment_changed:false` | `awaiting_environment_change` | 已知故障条件未变；等待相关恢复证据 |
+| category为`environment`，`environment_changed:true` | `diagnose_dependency_before_retry` | 依据变化证据核实当前依赖，满足原门禁后再决定是否确认 |
+| category为`product_candidate` | `triage_product_no_automatic_fix` | 产品分诊，修改产品另依授权 |
+| category为`needs_decision` | `diagnose_readonly` | 只读补证，澄清预期 |
+| category为`condition_missing` | `supply_condition` | 补齐缺失条件 |
+| category为`api_exclusive` | `handoff_api` | 转交API测试流程 |
+| category为`deferred` | `preserve_deferred` | 保留暂缓状态 |
+| category为`unbound_observation` | `preserve_evidence_limitation` | 保留观察及证据限制 |
+
+环境状态由项目adapter/runner依据`evidence`中的当前诊断填写。`environment_changed`针对相关故障条件，不能用无关部署变化或累计确认次数代填；缺省表示未知，显式值必须为boolean，不能传null、字符串或0/1。核实后用更新的归一化输入生成新的工作包文件，不覆盖旧包；工作包本身不执行健康检查，也不解除checkpoint中的依赖block。`true`不代表环境已健康或自动获得重跑授权。
+
+### 旧action迁移
+
+移除累计修复/确认次数上限后，**`repair_budget_exhausted`、`review_repair_budget`、`review_confirmation_budget`已废弃，当前工具不再生成**。这些名称是旧输出action，不是category；不要加入输入category枚举。
+
+| 旧action | runner迁移方式 |
+| --- | --- |
+| `repair_budget_exhausted`、`review_repair_budget` | 删除次数耗尽/补齐预算的路由；重新归一化输入生成v2包。无其他门禁的script项现在统一为`repair_then_affected` |
+| `review_confirmation_budget` | 不再要求补齐确认次数；核实相关环境状态，按上表三种状态路由 |
+| `awaiting_environment_change` | 名称保留，但不再由`confirmation_attempts >= 1`推断；v2仅在显式`environment_changed:false`时生成 |
+| `diagnose_dependency_before_retry` | 名称保留，v2仅在显式`environment_changed:true`时生成；缺省状态改为`review_environment_state` |
+
+输入字段及checkpoint journal无需迁移，旧次数仍保留为历史记录。消费工作包的runner须显式支持v2路由；已有v1包不改写结论、不直接作为v2执行队列，保留原文件并从当前证据生成新包。不要仅对旧action做字符串替换，因为授权、清理和环境状态都需要重新核实。
 
 正常只输出ready/blocked/复用数量和工作包摘要；细节留文件，全部执行结束后一次合并和报告。新报告失败只修绑定/产物，不重复业务执行

@@ -327,7 +327,7 @@ class WorkPackagesTest(unittest.TestCase):
 
     def test_missing_counts_do_not_create_a_budget_gate(self):
         self.assertEqual(self.build(self.item())['packages'][0]['action'], 'repair_then_affected')
-        result = self.build(self.item(category='environment'))
+        result = self.build(self.item(category='environment', environment_changed=True))
         self.assertEqual(result['packages'][0]['action'], 'diagnose_dependency_before_retry')
         self.assertNotIn('confirmation_attempts', result['packages'][0]['constraints_by_case']['A'])
 
@@ -335,11 +335,49 @@ class WorkPackagesTest(unittest.TestCase):
         result = self.build(self.item(category='environment', environment_changed=False))
         self.assertEqual(result['packages'][0]['action'], 'awaiting_environment_change')
 
-    def test_environment_recovery_or_diagnosis_is_not_blocked_by_lifetime_counts(self):
-        for extra in [{}, {'environment_changed': True}]:
+    def test_environment_routes_unknown_unchanged_and_changed_states_explicitly(self):
+        for count in [None, 0, 1, 8]:
+            for extra, expected in [
+                    ({}, 'review_environment_state'),
+                    ({'environment_changed': False}, 'awaiting_environment_change'),
+                    ({'environment_changed': True}, 'diagnose_dependency_before_retry')]:
+                with self.subTest(count=count, extra=extra):
+                    item = self.item(category='environment', **extra)
+                    if count is not None:
+                        item['confirmation_attempts'] = count
+                    result = self.build(item)
+                    self.assertEqual(result['schema_version'], 2)
+                    self.assertEqual(result['packages'][0]['action'], expected)
+                    self.assertFalse(result['execution_or_acceptance_changed'])
+
+    def test_unknown_environment_state_keeps_permission_and_cleanup_gates_first(self):
+        for extra, expected in [({'permission_required': True}, 'awaiting_authorization'),
+                                ({'cleanup_unknown': True}, 'cleanup_review_no_blind_retry')]:
             with self.subTest(extra=extra):
-                result = self.build(self.item(category='environment', confirmation_attempts=8, **extra))
-                self.assertEqual(result['packages'][0]['action'], 'diagnose_dependency_before_retry')
+                result = self.build(self.item(category='environment', **extra))
+                self.assertEqual(result['packages'][0]['action'], expected)
+
+    def test_environment_state_requires_a_boolean_when_present(self):
+        for value in [None, 'false', 0, 1]:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'must be boolean'):
+                self.build(self.item(category='environment', environment_changed=value))
+
+    def test_v2_output_uses_a_new_file_and_preserves_existing_v1_package(self):
+        request = self.root / 'input.json'
+        request.write_text(json.dumps({'items': [self.item(repair_attempts=8)]}), encoding='utf-8')
+        old = self.root / 'test/.cache/work-packages-v1.json'
+        old.parent.mkdir(parents=True)
+        old.write_text(json.dumps({'schema_version': 1, 'packages': [
+            {'action': 'repair_budget_exhausted', 'case_ids': ['A']}]}), encoding='utf-8')
+        before = old.read_bytes()
+        arguments = ['--project', str(self.root), '--input', str(request), '--output']
+        with mock.patch('sys.stdout'):
+            self.assertEqual(wp.main(arguments + ['test/.cache/work-packages-v1.json']), 2)
+            self.assertEqual(wp.main(arguments + ['test/.cache/work-packages-v2.json']), 0)
+        self.assertEqual(old.read_bytes(), before)
+        result = json.loads((old.parent / 'work-packages-v2.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['schema_version'], 2)
+        self.assertEqual(result['packages'][0]['action'], 'repair_then_affected')
 
     def test_api_deferred_and_unbound_are_separate_obligations(self):
         result = self.build(*(self.item(str(i), category=c) for i, c in enumerate(['api_exclusive', 'deferred', 'unbound_observation'])))

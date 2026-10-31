@@ -20,8 +20,10 @@ def action(item):
     if item['category'] == 'script':
         return 'repair_then_affected'
     if item['category'] == 'environment':
-        return ('awaiting_environment_change' if item.get('environment_changed') is False
-                else 'diagnose_dependency_before_retry')
+        if 'environment_changed' not in item:
+            return 'review_environment_state'
+        return ('diagnose_dependency_before_retry' if item['environment_changed']
+                else 'awaiting_environment_change')
     return {'product_candidate': 'triage_product_no_automatic_fix', 'needs_decision': 'diagnose_readonly',
             'condition_missing': 'supply_condition', 'api_exclusive': 'handoff_api',
             'deferred': 'preserve_deferred', 'unbound_observation': 'preserve_evidence_limitation'}[item['category']]
@@ -68,7 +70,7 @@ def build(project, request):
     packages = sorted(groups.values(), key=lambda g: (g['action'], g['category'], g['group_id']))
     for group in packages:
         group['case_ids'].sort()
-    return {'schema_version': 1, 'input_sha256': digest(request), 'counts': dict(Counter(i['category'] for i in request['items'])),
+    return {'schema_version': 2, 'input_sha256': digest(request), 'counts': dict(Counter(i['category'] for i in request['items'])),
             'item_count': len(seen), 'package_count': len(packages), 'packages': packages,
             'execution_or_acceptance_changed': False,
             'boundary': 'Component grouping is ownership triage, not proof of a shared root cause. No retries or approval are inferred.'}
