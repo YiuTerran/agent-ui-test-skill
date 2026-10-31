@@ -1,6 +1,6 @@
 # 断点调度与有限工作包
 
-用于长回归、中断续跑和失败确认。程序负责日志、输入指纹、领取、预算和分组；Agent只诊断未知根因、审核依赖闭包及编写修复。以下入口独立于`workflow.py`，不启动产品测试、不修改验收状态、不授予权限、不替代浏览器配额
+用于长回归、中断续跑和失败确认。程序负责日志、输入指纹、领取、修复历史和分组；Agent只诊断未知根因、审核依赖闭包及编写修复。以下入口独立于`workflow.py`，不启动产品测试、不修改验收状态、不授予权限、不替代浏览器配额
 
 ## 一次接入项目runner
 
@@ -90,7 +90,7 @@ Reporter环境变量由runner传入子进程，不打印：
 
 通过`record`追加；熔断跨重启保留，仅阻断相关dependencies。已运行CLI不会被工具杀死，runner负责停止后续派发和必要的受控中断。只读健康核验及环境恢复有证据后，record对应`unblock`。权限/安全锁必须先取得所需授权，普通继续测试或工具升级不能替代授权
 
-## 有限修复与确认
+## 按进展修复与失败确认
 
 失败清理核验后，record以下一种事件才重新进入pending：
 
@@ -98,9 +98,10 @@ Reporter环境变量由runner传入子进程，不打印：
 {"type":"repair","event_id":"repair-A-1","case_id":"A","root_cause_id":"locator-1","evidence":["test/.cache/diagnosis.json"]}
 ```
 
-- `repair`：每case累计最多2次；更换根因名、attempt或组件均不重置
-- `confirm`：相同结构，type改为confirm；每case累计最多1次确认，保留原失败。网络确认前先核环境和unknown创建，不把确认当盲重试
-- 输入变化只失效依赖该输入的通过观察。失败仍需显式诊断；预算耗尽转有限工作包，不继续代表复跑或全量调试
+- `repair`：附明确诊断和修复证据；获准范围内的测试代码、fixture、runner及报告绑定问题持续修到可用，不限制每case累计次数。先验证受影响目标，稳定后完成要求的回归；不改业务预期或吞异常制造通过
+- `confirm`：相同结构，type改为confirm；每次有新的诊断依据或相关环境恢复证据才确认，保留原失败。不按case历史次数阻止后续确认；网络确认前先核环境和unknown创建
+- 同根因、同输入和环境且没有新证据时停止重复执行，改查页面、日志、网络或依赖。程序仍要求终态、真实证据文件和清理核验；证据是否带来进展由runner/Agent判断，不用更换event_id或root_cause_id代替诊断
+- 输入变化只失效依赖该输入的通过观察。失败仍需显式诊断，修复次数仅记历史；无需迁移已有journal。真正缺权限、预期、环境或资源清理依据时，保留对应工作包，不因累计次数放弃可修复用例
 - 一个连续区间由runner完成，不逐case返回Agent。只在未知预期、未知根因、修复或真实授权缺口时交回
 
 ## 观察与正式验收分开
@@ -118,6 +119,6 @@ python3 "$SKILL/scripts/work_packages.py" --project "$PROJECT" \
 
 每项必填`case_id/category/evidence`，可带`root_cause_id/component/repair_attempts/confirmation_attempts/permission_required/cleanup_unknown/environment_changed`。category支持`product_candidate/needs_decision/environment/script/condition_missing/api_exclusive/deferred/unbound_observation/cleanup_unknown`。evidence是已有项目相对文件路径，复杂原ID或证据指针由项目adapter另存索引，不存凭据
 
-仅明确根因按root_cause_id合并；component聚类标为`component_triage_only`，不推断共同bug。主action区分授权、清理、预算、环境恢复、产品分诊、API移交与暂缓；`constraints_by_case`保留同时存在的其他门禁。输出不重试、不改历史、不解锁、不改变覆盖或验收；相同输出仅允许同内容幂等重放。未知预算不填0冒充可修复，由诊断证据说明待核
+仅明确根因按root_cause_id合并；component聚类标为`component_triage_only`，不推断共同bug。主action区分授权、清理、测试修复、环境诊断/恢复、产品分诊、API移交与暂缓；`constraints_by_case`保留其他门禁及历史次数。`repair_attempts/confirmation_attempts`可缺省，只用于记录，不产生次数门禁。环境问题明确`environment_changed:false`表示相关故障条件未变，应等待恢复；true或缺省时先诊断当前依赖，不凭历史确认次数推断环境不可用或允许重跑。输出不重试、不改历史、不解锁、不改变覆盖或验收；相同输出仅允许同内容幂等重放
 
 正常只输出ready/blocked/复用数量和工作包摘要；细节留文件，全部执行结束后一次合并和报告。新报告失败只修绑定/产物，不重复业务执行

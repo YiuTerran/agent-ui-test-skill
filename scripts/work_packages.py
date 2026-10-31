@@ -18,14 +18,10 @@ def action(item):
     if item.get('cleanup_unknown') or item['category'] == 'cleanup_unknown':
         return 'cleanup_review_no_blind_retry'
     if item['category'] == 'script':
-        if 'repair_attempts' not in item:
-            return 'review_repair_budget'
-        return 'repair_budget_exhausted' if item.get('repair_attempts', 0) >= 2 else 'repair_then_affected'
+        return 'repair_then_affected'
     if item['category'] == 'environment':
-        if 'confirmation_attempts' not in item:
-            return 'review_confirmation_budget'
-        return ('awaiting_environment_change' if item.get('confirmation_attempts', 0) >= 1
-                and not item.get('environment_changed') else 'diagnose_dependency_before_retry')
+        return ('awaiting_environment_change' if item.get('environment_changed') is False
+                else 'diagnose_dependency_before_retry')
     return {'product_candidate': 'triage_product_no_automatic_fix', 'needs_decision': 'diagnose_readonly',
             'condition_missing': 'supply_condition', 'api_exclusive': 'handoff_api',
             'deferred': 'preserve_deferred', 'unbound_observation': 'preserve_evidence_limitation'}[item['category']]

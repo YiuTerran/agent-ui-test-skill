@@ -143,6 +143,7 @@ def state(rows):
                 if cases[selected]['status'] == 'unfinished':
                     cases[selected]['status'] = 'pending'
         elif kind in {'repair', 'confirm'}:
+            # Keep historical counts for existing journals, without limiting useful work.
             cases[cid]['repairs' if kind == 'repair' else 'confirmations'] += 1
             cases[cid]['status'] = 'pending'
         elif kind in {'block', 'unblock'}:
@@ -230,7 +231,6 @@ def record(project, rows, event):
         cid = event['case_id']; identifier(event['root_cause_id'])
         check(cid in cases and cases[cid]['status'] in {'failed', 'skipped', 'timedOut', 'interrupted'}, 'requires a diagnosed terminal case')
         check(not any(cid in a['case_ids'] for a in attempts.values() if not a['closed']), 'close cleanup obligations first')
-        check(cases[cid]['repairs' if kind == 'repair' else 'confirmations'] < (2 if kind == 'repair' else 1), 'repair/confirmation budget exhausted')
     elif kind in {'block', 'unblock'}:
         identifier(event['dependency'])
         check(any(event['dependency'] in c['dependencies'] for c in spec['cases']), 'unknown dependency')

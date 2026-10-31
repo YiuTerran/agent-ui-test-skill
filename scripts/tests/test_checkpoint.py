@@ -223,22 +223,51 @@ except ValueError: sys.exit(2)
         with self.assertRaisesRegex(ValueError, 'hash mismatch'):
             self.call('plan')
 
-    def test_failure_needs_explicit_confirmation_and_only_one_is_allowed(self):
-        self.claim(); self.end('failed'); self.close()
-        self.assertNotIn('A', self.call('plan')['ready'])
-        self.event('confirm', case_id='A', root_cause_id='network')
-        self.claim('run2'); self.end('failed', 'run2', eid='end2'); self.close('run2', 'close2')
-        with self.assertRaisesRegex(ValueError, 'budget exhausted'):
-            self.event('confirm', 'confirm2', case_id='A', root_cause_id='network')
-
-    def test_repair_budget_persists_across_attempts_and_roots(self):
+    def test_confirmations_for_new_evidence_are_not_limited_by_case_history(self):
         for index in range(3):
-            attempt = f'run{index}'
-            self.claim(attempt); self.end('failed', attempt, eid=f'end{index}'); self.close(attempt, f'close{index}')
-            if index < 2:
-                self.event('repair', f'repair{index}', case_id='A', root_cause_id=f'cause{index}')
-        with self.assertRaisesRegex(ValueError, 'budget exhausted'):
-            self.event('repair', 'third', case_id='A', root_cause_id='new-root')
+            attempt = f'confirm-run{index}'
+            self.claim(attempt)
+            self.end('failed', attempt, eid=f'end{index}')
+            self.close(attempt, f'close{index}')
+            self.assertNotIn('A', self.call('plan')['ready'])
+            (self.root / 'proof.json').write_text(f'environment recovered after outage {index}')
+            result = self.event('confirm', f'confirm{index}', case_id='A', root_cause_id='network')
+            self.assertIn('A', result['ready'])
+        self.claim('recovered')
+        self.end(attempt='recovered', eid='recovered-end')
+        self.assertEqual(self.close('recovered', 'recovered-close')['reused_observations'], ['A'])
+        _, cases, _, _, _ = cp.state(cp.replay(self.root / self.journal))
+        self.assertEqual(cases['A']['confirmations'], 3)
+
+    def test_repairs_continue_beyond_two_and_replay_preserves_history(self):
+        for index in range(4):
+            attempt = f'repair-run{index}'
+            self.claim(attempt)
+            self.end('failed', attempt, eid=f'end{index}')
+            self.close(attempt, f'close{index}')
+            (self.root / 'test/a.ts').write_text(f'fix {index}')
+            (self.root / 'proof.json').write_text(f'diagnosed test defect {index}')
+            self.event('repair', f'repair{index}', case_id='A', root_cause_id=f'cause{index}')
+        self.assertIn('A', cp.dispatch(self.root, self.journal, 'plan', {})['ready'])
+        self.claim('fixed')
+        self.end(attempt='fixed', eid='fixed-end')
+        self.assertEqual(self.close('fixed', 'fixed-close')['reused_observations'], ['A'])
+        rows = cp.replay(self.root / self.journal)
+        _, cases, _, _, _ = cp.state(rows)
+        self.assertEqual(cases['A']['repairs'], 4)
+        self.assertEqual(sum(row['event'].get('status') == 'failed' for row in rows), 4)
+
+    def test_repair_and_confirmation_still_require_cleanup_and_evidence(self):
+        self.claim()
+        self.end('failed')
+        for kind in ['repair', 'confirm']:
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'close cleanup'):
+                self.event(kind, case_id='A', root_cause_id='diagnosed')
+        self.close()
+        (self.root / 'proof.json').unlink()
+        for kind in ['repair', 'confirm']:
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'evidence file missing'):
+                self.event(kind, case_id='A', root_cause_id='diagnosed')
 
     def test_unknown_fields_cannot_persist_secrets(self):
         with self.assertRaisesRegex(ValueError, 'fields'):
@@ -284,22 +313,33 @@ class WorkPackagesTest(unittest.TestCase):
         result = self.build(self.item(component='picker'), self.item('B', component='picker'))
         self.assertEqual(result['packages'][0]['grouping_basis'], 'component_triage_only')
 
-    def test_exhausted_budget_is_not_mixed_with_actionable_repairs(self):
-        result = self.build(self.item(root_cause_id='same'), self.item('B', root_cause_id='same', repair_attempts=2))
-        self.assertEqual(result['package_count'], 2)
-        self.assertIn('repair_budget_exhausted', [p['action'] for p in result['packages']])
+    def test_prior_repair_counts_do_not_split_or_block_actionable_repairs(self):
+        result = self.build(self.item(root_cause_id='same'),
+                            self.item('B', root_cause_id='same', repair_attempts=8))
+        self.assertEqual(result['package_count'], 1)
+        self.assertEqual(result['packages'][0]['action'], 'repair_then_affected')
+        self.assertEqual(result['packages'][0]['case_ids'], ['A', 'B'])
+        self.assertEqual(result['packages'][0]['constraints_by_case']['B']['repair_attempts'], 8)
 
     def test_permission_and_unknown_resources_prevent_retry(self):
         self.assertEqual(self.build(self.item(permission_required=True))['packages'][0]['action'], 'awaiting_authorization')
         self.assertEqual(self.build(self.item(cleanup_unknown=True))['packages'][0]['action'], 'cleanup_review_no_blind_retry')
 
-    def test_missing_budget_is_not_treated_as_zero(self):
-        self.assertEqual(self.build(self.item())['packages'][0]['action'], 'review_repair_budget')
-        self.assertEqual(self.build(self.item(category='environment'))['packages'][0]['action'], 'review_confirmation_budget')
+    def test_missing_counts_do_not_create_a_budget_gate(self):
+        self.assertEqual(self.build(self.item())['packages'][0]['action'], 'repair_then_affected')
+        result = self.build(self.item(category='environment'))
+        self.assertEqual(result['packages'][0]['action'], 'diagnose_dependency_before_retry')
+        self.assertNotIn('confirmation_attempts', result['packages'][0]['constraints_by_case']['A'])
 
-    def test_repeated_environment_failure_waits_for_change(self):
-        result = self.build(self.item(category='environment', confirmation_attempts=1))
+    def test_confirmed_unchanged_environment_waits_even_without_attempt_counts(self):
+        result = self.build(self.item(category='environment', environment_changed=False))
         self.assertEqual(result['packages'][0]['action'], 'awaiting_environment_change')
+
+    def test_environment_recovery_or_diagnosis_is_not_blocked_by_lifetime_counts(self):
+        for extra in [{}, {'environment_changed': True}]:
+            with self.subTest(extra=extra):
+                result = self.build(self.item(category='environment', confirmation_attempts=8, **extra))
+                self.assertEqual(result['packages'][0]['action'], 'diagnose_dependency_before_retry')
 
     def test_api_deferred_and_unbound_are_separate_obligations(self):
         result = self.build(*(self.item(str(i), category=c) for i, c in enumerate(['api_exclusive', 'deferred', 'unbound_observation'])))
@@ -310,7 +350,7 @@ class WorkPackagesTest(unittest.TestCase):
         with self.assertRaises(ValueError): self.build(self.item(), self.item())
         with self.assertRaises(ValueError): self.build(self.item(permission_required='false'))
 
-    def test_group_retains_compound_gates_and_exhausted_budget(self):
+    def test_group_retains_compound_gates_and_historical_counts(self):
         result = self.build(self.item(permission_required=True, cleanup_unknown=True, repair_attempts=2))
         package = result['packages'][0]
         self.assertEqual(package['action'], 'awaiting_authorization')
