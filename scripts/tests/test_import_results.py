@@ -540,6 +540,75 @@ class ImportResultsTest(unittest.TestCase):
                 self.coverage(lambda c: c['cases'].update(C1=dict(original, **change)))
                 self.assertEqual(expected, self.result()['unresolved'][0]['reason'])
 
+    def test_exact_static_sensitive_word_id_is_recordable(self):
+        cid = 'C1.lifecycle-token-missing-login-session-password'
+        def rename(cov):
+            case = cov['cases'].pop('C1')
+            case['test_id'] = cid
+            cov['cases'][cid] = case
+            cov['requirements']['R1']['case_ids'] = [cid]
+        self.coverage(rename)
+        self.prepare()
+        result = self.result()
+        self.assertEqual([], result['unresolved'])
+        self.assertEqual([cid], result['events'][0]['case_ids'])
+        wf.no_secrets(result['events'])
+        self.record(result['events'])
+        for suffix in ('token-missing', 'token-stale', 'token-other-user', 'login', 'session'):
+            self.assertTrue(imp.safe_identity('C1.lifecycle-' + suffix, set(), coverage_mapped=True))
+
+    def test_static_identity_does_not_allow_values_or_controls(self):
+        for value in ('token=private', 'authorization:Bearer-private', 'https://host/id',
+                      'wss://host/id', 'token%3Dprivate', 'C1\nlogin', 'C1\x7f-token',
+                      'C1\x85-token', 'C1\u202e-token', 'C1.' + 'a' * 32,
+                      'C1.token.' + 'A' * 24):
+            with self.subTest(value=value):
+                self.assertFalse(imp.safe_identity(value, set(), coverage_mapped=True))
+        self.assertFalse(imp.safe_identity('C1.token-known-value', {'known-value'}, coverage_mapped=True))
+        self.assertFalse(imp.safe_identity('C1.lifecycle-token-missing', set()))
+        with self.assertRaises(ValueError):
+            wf.no_secrets({'nested': {'token': 'fixture-only'}})
+
+    def test_static_word_ids_still_require_exact_mapping(self):
+        self.coverage(lambda c: c['cases']['C1'].update(test_id='C1.lifecycle-token-missing'))
+        target = self.target()
+        target['title'] = 'unmapped login token title'
+        self.prepare([target])
+        self.assertEqual('no_exact_coverage_match', self.result()['unresolved'][0]['reason'])
+
+    def test_mapped_unicode_and_semantic_underscore_id_styles(self):
+        self.prepare()
+        for value in ('C1.create_order_with_discount_code', '登录-01',
+                      'checkout_flow_with_coupon_applied', '登录_token_过期-01'):
+            with self.subTest(value=value):
+                self.coverage(lambda c: c['cases']['C1'].update(test_id=value))
+                result = self.result()
+                self.assertEqual([], result['unresolved'])
+                self.assertEqual(value, result['events'][0]['test_id'])
+                wf.no_secrets(result['events'])
+        self.record(result['events'])
+
+    def test_mapped_unicode_case_id_and_test_id_are_recordable(self):
+        def rename(cov):
+            case = cov['cases'].pop('C1')
+            case['test_id'] = '登录_token_过期-01'
+            cov['cases']['登录-01'] = case
+            cov['requirements']['R1']['case_ids'] = ['登录-01']
+        self.coverage(rename)
+        self.prepare()
+        result = self.result()
+        self.assertEqual([], result['unresolved'])
+        self.assertEqual(['登录-01'], result['events'][0]['case_ids'])
+        self.record(result['events'])
+
+    def test_static_word_id_cannot_echo_labelled_secret(self):
+        value = 'C1.lifecycle-token-missing'
+        self.coverage(lambda c: c['cases']['C1'].update(test_id=value))
+        target = self.target()
+        target['tests'][0]['results'][0]['error'] = {'token': value}
+        self.prepare([target])
+        self.assertEqual('unsafe_coverage_identity', self.result()['unresolved'][0]['reason'])
+
     def test_absolute_files_inside_project_without_root_dir(self):
         target = self.target()
         target['file'] = str(self.project / 'test/src/C1.spec.ts')

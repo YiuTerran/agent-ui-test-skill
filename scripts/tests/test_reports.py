@@ -306,6 +306,18 @@ class ReportTest(unittest.TestCase):
         self.html(report, raw, mutate)
         return {'type': 'merged_report', 'report': report}
 
+    def test_interruption_marker_matches_native_html_without_changing_real_errors(self):
+        facts = wf.report_artifacts.error_facts
+        raw = {"status": "interrupted", "errors": []}
+        native = {"status": "interrupted", "errors": [{"message": "Test was interrupted."}]}
+        self.assertEqual(facts(raw), facts(native))
+        self.assertNotEqual(facts(dict(raw, errors=[{"message": "real failure"}])), facts(native))
+        self.assertEqual(facts(dict(raw, errors=[{"message": "real failure"}])),
+                         facts(dict(native, errors=native["errors"] + [{"message": "real failure"}])))
+        self.assertNotEqual(facts({"status": "failed", "errors": []}),
+                            facts({"status": "failed", "errors": native["errors"]}))
+        self.assertNotEqual(facts(raw), facts({"status": "passed", "errors": []}))
+
     def test_native_merge_requires_all_attempts_and_publishes_one_entry(self):
         self.start()
         self.check_sources()

@@ -102,11 +102,15 @@ def safe_value(value, secrets, depth=0):
     return REDACTED
 
 
-def safe_identity(value, secrets):
+def safe_identity(value, secrets, *, coverage_mapped=False):
+    # Coverage-authored IDs may be Unicode words; underscores delimit semantic parts.
     return (isinstance(value, str) and 0 < len(value) <= 256
-            and not SENSITIVE.search(value) and not URL.search(value)
-            and not any(s in value for s in secrets)
-            and all(c >= ' ' for c in value))
+            and not URL.search(value) and not any(s in value for s in secrets)
+            and all(c.isprintable() for c in value)
+            and ((not coverage_mapped and not SENSITIVE.search(value))
+                 or (coverage_mapped
+                     and re.fullmatch(r'\w[\w.-]*', value) is not None
+                     and not re.search(r'(?:^|[._-])[A-Za-z0-9]{24,}(?=$|[._-])', value))))
 
 
 def relative_file(project, value, root=None):
@@ -397,7 +401,8 @@ def import_results(project, run_id, bundle_id, pending_bundle=None):
                 continue
             tid = ('setup-' + digest(spec.get('file'), spec.get('title'), test.get('projectName'))
                    if setup else match[1]['test_id'])
-            if not setup and not all(safe_identity(v, secrets) for v in (match[0], tid)):
+            if not setup and not all(safe_identity(v, secrets, coverage_mapped=True)
+                                     for v in (match[0], tid)):
                 reject(pointer, index, setup, 'unsafe_coverage_identity')
                 continue
             event = {'type': 'execution', 'execution_id': 'import-' + digest(run_id, bundle_id, pointer, index),

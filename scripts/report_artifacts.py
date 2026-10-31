@@ -104,6 +104,9 @@ def error_facts(result):
         normalized = ANSI.sub('', text).strip()
         if normalized:
             messages.add(normalized)
+    # Playwright HTML synthesizes this status marker; JSON retains only real errors.
+    if result.get("status") == "interrupted":
+        messages.add("Test was interrupted.")
     return tuple(sorted(messages))
 
 

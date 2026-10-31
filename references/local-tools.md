@@ -1,6 +1,8 @@
 # 本地辅助入口
 
-用于减少临时脚本和字段试错。所有命令经`workflow.py`调用，Python3.10+标准库，不执行产品测试；`finalize`可调用已安装的本地Playwright离线合并，禁止下载依赖；`valid=true`只描述该命令的检查结果。原有start/renew/record/collect-results等命令继续可用
+用于减少临时脚本和字段试错。本页命令经`workflow.py`调用，Python3.10+标准库，不执行产品测试；`finalize`可调用已安装的本地Playwright离线合并，禁止下载依赖；`valid=true`只描述该命令的检查结果。原有start/renew/record/collect-results等命令继续可用
+
+长回归的独立入口`checkpoint.py`、Playwright sidecar与`work_packages.py`见[断点调度与有限工作包](checkpoints.md)。项目runner接入后程序化续跑与局部熔断，不替代本页的配额、Attempt采集或验收。
 
 指定case复测、只跑自动化及确认来源变更先按[确定性任务](workflow.md#确定性任务直接完成)处理；以下入口用于确需工作流绑定的任务。确定性区间在一次宿主调用内连续完成，不为机械步骤派Agent、逐条研究字段或另写多份摘要。组合入口返回成功后直接交付。
 
