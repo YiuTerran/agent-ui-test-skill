@@ -88,7 +88,7 @@ Reporter环境变量由runner传入子进程，不打印：
 {"type":"block","event_id":"login-down-1","dependency":"login","evidence":["test/.cache/login-diagnostic.json"]}
 ```
 
-通过`record`追加；熔断跨重启保留，仅阻断相关dependencies。已运行CLI不会被工具杀死，runner负责停止后续派发和必要的受控中断。只读健康核验及环境恢复有证据后，record对应`unblock`。权限/安全锁必须先取得所需授权，普通继续测试或工具升级不能替代授权
+通过`record`追加；熔断跨重启保留，仅阻断相关dependencies。已运行CLI不会被工具杀死，runner负责停止后续派发和必要的受控中断。只读健康核验及环境恢复有证据后，record对应`unblock`。权限/安全锁必须有相应有效授权，普通继续测试或工具升级不能替代授权；已有有效授权直接复用，不逐次重问。框架缺陷或旧恢复标记由主Agent先按[自动解阻](workflow.md#框架自修复与自动解阻)修复、核验，再登记unblock，不直接删除block历史
 
 ## 按进展修复与失败确认
 
@@ -102,7 +102,7 @@ Reporter环境变量由runner传入子进程，不打印：
 - `confirm`：相同结构，type改为confirm；每次有新的诊断依据或相关环境恢复证据才确认，保留原失败。不按case历史次数阻止后续确认；网络确认前先核环境和unknown创建
 - 同根因、同输入和环境且没有新证据时停止重复执行，改查页面、日志、网络或依赖。程序仍要求终态、真实证据文件和清理核验；证据是否带来进展由runner/Agent判断，不用更换event_id或root_cause_id代替诊断
 - 输入变化只失效依赖该输入的通过观察。失败仍需显式诊断，修复次数仅记历史；无需迁移已有journal。真正缺权限、预期、环境或资源清理依据时，保留对应工作包，不因累计次数放弃可修复用例
-- 一个连续区间由runner完成，不逐case返回Agent。只在未知预期、未知根因、修复或真实授权缺口时交回
+- 一个连续区间由runner完成，不逐case返回Agent。未知根因、修复和状态对账交回主Agent自主处理，完成验证后继续派发；只有确实需要用户决定或无法自行取得的恢复条件才转人工，不把交回Agent等同于暂停等用户
 
 ## 观察与正式验收分开
 
@@ -123,7 +123,7 @@ python3 "$SKILL/scripts/work_packages.py" --project "$PROJECT" \
 
 ### 输出action与runner路由
 
-`category`是输入分类，枚举保持不变；以下是输出`packages[].action`。runner先检查顶层`schema_version`，当前为`2`；不支持的版本或未知action停止自动派发并报告，不回退到执行测试。权限和清理门禁优先于category路由。
+`category`是输入分类，枚举保持不变；以下是输出`packages[].action`。runner先检查顶层`schema_version`，当前为`2`；不支持的版本或未知action停止自动派发并报告，不回退到执行测试。权限和清理门禁优先于category路由。action是下一项工作，不全部代表用户等待：`repair_then_affected`、`cleanup_review_no_blind_retry`和`review_environment_state`交主Agent自行修复/只读核实；`awaiting_authorization`只用于核对既有授权后仍确实缺权限的情况，不为方便执行直接清除输入标志。取得新证据后保留旧包并重新归一化生成新包，门禁满足后续跑。
 
 | 条件（按优先级） | 输出action | runner下一步 |
 | --- | --- | --- |

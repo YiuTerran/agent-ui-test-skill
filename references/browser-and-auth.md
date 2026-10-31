@@ -68,6 +68,8 @@ Playwright setup project独立于自己生成的认证状态，业务project依�
 
 每次变更按[资源账本](contracts.md#resourcehumandelegation)登记`kind=shared_config`，脚本强制以下规则：intent必带`config_key`和`original_snapshot`（`test/.cache/`下的原值JSON）；变更成功后confirmed，owned=true，receipt为变更响应；恢复后回读存为JSON，absence_verified必带`restored_snapshot`，与原值的规范化JSON一致才接受。回读不一致时资源保持confirmed，残留建议为restore，并登记environment issue；同组后续写入先恢复回读再继续，不依赖进程退出后的锁表达未恢复。跨机器运行协调相同时段，或使用各方都能访问的锁。与其他使用方共用的范围（如共享系统租户、无隔离的单一环境）不变更配置；其中已授权的本轮专用数据仍按owned规则准备和清理。
 
+恢复标记残留时由主Agent按[自动解阻](workflow.md#框架自修复与自动解阻)自行对账，不因存在标记就重复索要授权。在同组互斥下核对原账本绑定的身份、范围、配置项和不可变原值，取得当前服务回读；若已一致，直接将新回读作为`restored_snapshot`，通过resource事件登记`absence_verified`，不要求额外配置写入。项目fixture另有恢复标记时，在账本结案并验证恢复条件后用恢复入口归档，保留诊断历史。若尚未一致，只执行原授权包含的恢复；缺少可靠原值、归属或恢复权限时仍保留阻塞。
+
 应用支持且本轮需要临时身份时，按run、worker或case登记intent及准确ID，先回读账号、适用的组织归属和完整有效权限，再提供独立登录态。业务资源清理完成后，只回收归属本run或其显式继承账本的临时身份及关联资源，按应用契约和依赖顺序选择实际支持且已授权的撤权、禁用或删除操作，并回读验证结果。支持删除时确认缺席后登记absence_verified，再释放唯一标识（如邮箱、手机号）及私有状态；不支持删除时按下节放回复用池或禁用，登记retained_verified，不伪造absence。旧会话即时失效仅在应用契约要求且本轮需要验证时检查，不把禁用、会话撤销或固定的“先禁用再删除”顺序作为所有应用的清理前置。中断恢复只处理原账本绑定的准确资源；未知创建结果阻止重建和猜测删除。准备核验、静态检查与真实权限回归分别报告。
 
 ### 临时身份复用池
