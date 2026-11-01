@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 import sys
 
-from checkpoint import check, digest, identifier, read, safe
+from checkpoint import (check, digest, identifier, read, safe, residual_gate, residual_index,
+                        residual_kinds, residual_lock, resource_access)
 
 CATEGORIES = {'product_candidate', 'needs_decision', 'environment', 'script', 'condition_missing',
               'api_exclusive', 'deferred', 'unbound_observation', 'cleanup_unknown'}
@@ -30,11 +31,23 @@ def action(item):
 
 
 def build(project, request):
-    check(set(request) == {'items'}, 'worklist requires items only')
+    with residual_lock(project):
+        return build_locked(project, request)
+
+
+def build_locked(project, request):
+    check({'items'} <= set(request) <= {'items', 'resource_environment'},
+          'worklist requires items; optional resource_environment')
+    environment = request.get('resource_environment')
+    if environment is not None:
+        identifier(environment)
+    index = residual_index(project)
+    pending_kinds = residual_kinds(index, environment)
     check(isinstance(request['items'], list), 'items must be a list')
     groups, seen, checked_evidence = {}, set(), set()
     allowed = {'case_id', 'category', 'root_cause_id', 'component', 'evidence', 'repair_attempts',
-               'confirmation_attempts', 'permission_required', 'cleanup_unknown', 'environment_changed'}
+               'confirmation_attempts', 'permission_required', 'cleanup_unknown', 'environment_changed',
+               'resource_access'}
     for item in request['items']:
         check(isinstance(item, dict) and set(item) <= allowed, 'unknown item fields; normalize raw reports first')
         identifier(item['case_id'])
@@ -49,12 +62,18 @@ def build(project, request):
             check(isinstance(value, int) and not isinstance(value, bool) and value >= 0, 'invalid attempt count')
         for key in ['permission_required', 'cleanup_unknown', 'environment_changed']:
             check(key not in item or isinstance(item[key], bool), 'safety flags must be boolean')
+        if 'resource_access' in item:
+            resource_access(item['resource_access'])
         check(isinstance(item.get('evidence'), list) and item['evidence'], 'evidence required')
         for name in item['evidence']:
             check(isinstance(name, str), 'evidence path must be a string')
             if name not in checked_evidence:
                 check(safe(project, name).is_file(), 'evidence missing')
                 checked_evidence.add(name)
+        item = dict(item)
+        blocked_kinds = residual_gate(pending_kinds, item.get('resource_access'))
+        if blocked_kinds:
+            item['cleanup_unknown'] = True
         todo = action(item)
         basis = 'explicit_root_cause' if item.get('root_cause_id') else ('component_triage_only' if item.get('component') else 'individual')
         group_id = item.get('root_cause_id') or item.get('component') or item['case_id']
@@ -65,12 +84,15 @@ def build(project, request):
         group['case_ids'].append(item['case_id'])
         group['constraints_by_case'][item['case_id']] = {
             key: item[key] for key in ['repair_attempts', 'confirmation_attempts', 'permission_required',
-                                      'cleanup_unknown', 'environment_changed'] if key in item}
+                                      'cleanup_unknown', 'environment_changed', 'resource_access'] if key in item}
+        if blocked_kinds:
+            group['constraints_by_case'][item['case_id']]['residual_kinds'] = blocked_kinds
         group['evidence'] = sorted(set(group['evidence']) | set(item['evidence']))
     packages = sorted(groups.values(), key=lambda g: (g['action'], g['category'], g['group_id']))
     for group in packages:
         group['case_ids'].sort()
     return {'schema_version': 2, 'input_sha256': digest(request), 'counts': dict(Counter(i['category'] for i in request['items'])),
+            'residual_index_sha256': digest(index),
             'item_count': len(seen), 'package_count': len(packages), 'packages': packages,
             'execution_or_acceptance_changed': False,
             'boundary': 'Component grouping is ownership triage, not proof of a shared root cause. No retries or approval are inferred.'}

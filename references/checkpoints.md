@@ -92,6 +92,66 @@ Reporter环境变量由runner传入子进程，不打印：
 
 通过`record`追加；熔断跨重启保留，仅阻断相关dependencies。已运行CLI不会被工具杀死，runner负责停止后续派发和必要的受控中断。只读健康核验及环境恢复有证据后，record对应`unblock`。权限/安全锁必须有相应有效授权，普通继续测试或工具升级不能替代授权；已有有效授权直接复用，不逐次重问。框架缺陷或旧恢复标记由主Agent先按[自动解阻](workflow.md#框架自修复与自动解阻)修复、核验，再登记unblock，不直接删除block历史
 
+## 跨run残留门禁
+
+runner在资源创建结果未决或清理失败时，立即调用`checkpoint.py record`登记`cleanup_state`，成功后才进入下一波claim；已有`cleanup_state`适配器将自身账本归一化到此事件。该入口只保存本地证据，不执行删除，也不自动读取业务fixture。旧账本由adapter按原始run及准确资源ID一次性补登记；索引上线本身不会发现尚未导入的历史残留。
+
+清单可增加`resource_environment`和`resource_run_id`。前者是稳定的测试环境+租户/数据域别名，不随部署、checkpoint或run变化；后者在同轮所有checkpoint间保持一致。缺省时登记分别沿用`environment_id`和journal路径，仅兼容旧接入。工具内部记录`environment_is_stable`，不接受事件自行提供；旧索引缺此字段或生产方未声明稳定环境的未决资源，对所有环境的相关写操作保守阻断，即使新consumer已声明稳定别名也不能绕过。改用新清单重复登记同一身份不能升级旧记录的环境可信度；须在原journal/环境命名空间按准确ID和实际核验凭据关闭旧残留。consumer未声明稳定环境时同样检查全部环境；只有明确稳定的记录才按环境隔离。
+
+每个case及工作包item可增加`resource_access`，例如：
+
+```json
+{"mode":"write","kinds":["product"],"dependencies":["category"]}
+```
+
+`kinds`为可能写入的资源类型，`dependencies`为这些写操作依赖的资源类型。审核完整fixture闭包后填写。`mode:readonly`且`kinds:[]`的case继续；write与未决kind无交集也继续。缺省resource_access的case在相关环境存在残留时保守阻断；显式两个空数组表示没有相关资源依赖，不代表可跳过其他权限或冲突门禁。
+
+登记示例，`evidence`引用已脱敏的现有清理回执：
+
+```json
+{"type":"cleanup_state","event_id":"category-cleanup-1","resources":[{"kind":"category","id":"70","status":"cleanup_failed","evidence":["test/.cache/cleanup-receipt.json"]}]}
+```
+
+资源status支持`intent/confirmed/ambiguous/cleanup_failed/absence_verified/retained_verified`。`test/.cache/resource-residuals.json`在项目共享锁内增量更新，按`resource_environment+kind+id`去重；不遍历历史run。索引先原子保存并fsync，再追加checkpoint，进程中断后仍阻断；相同journal+event_id幂等，不以旧事件重放覆盖新状态。索引损坏时停止派发并保留原件。
+
+自动`cleanup_state`桥接由runner在创建结果未决及清理结果产生时实际执行：归一化准确资源ID、状态和证据，调用`checkpoint.py record`并检查退出码，在下一次相关写派发前确认索引已持久化；桥接失败时保留证据并阻断相关写操作。手工seed用于历史初始化，持续接入以实际桥接调用回执及索引回读为依据，仅seed加gate不代表自动桥接已生效。
+
+恢复仍走同一事件：status改为`absence_verified`，evidence中的JSON回读回执须匹配环境、kind、id、status，并含严格布尔值`verified:true`：
+
+```json
+{"resource_environment":"tenant-dev","kind":"category","id":"70","status":"absence_verified","verified":true}
+```
+
+`retained_verified`还要求事件和回执的`retention`一致且为`pooled/disabled`，保留结果须满足原资源账本及授权要求。回执由runner依据实际absence查询或保留状态回读生成，附相应来源证据；工具核验匹配字段，不代替真实查询。test passed、close.cleanup_verified或普通依赖unblock均不改变此索引。仅关闭已核验的准确ID，同kind其他残留继续阻断。
+
+`shared_config`不允许保留关闭，也不能仅凭通用`verified:true`回执关闭。adapter须先在未决事件中以`original_snapshot`引用资源账本中真实、修改前的原值JSON；工具固定路径并计算规范化JSON的SHA256，后续跨run登记不得替换路径、清空基线或改写原件。历史原值暂缺时可先登记未决以阻断，但不能拿当前值冒充原值，也不能在关闭事件中首次补造基线。恢复后以`absence_verified`关闭（此处表示原值恢复，并非删除配置），事件另带`restored_snapshot`指向实际恢复后回读JSON，且匹配回执必须引用同一`restored_snapshot`。工具核验恢复值与已固定原值的规范化JSON一致；其他kind不接受这两个快照字段。例如先登记原值，再恢复回读后关闭：
+
+```json
+{"type":"cleanup_state","event_id":"config-pending","resources":[{"kind":"shared_config","id":"config-1","status":"cleanup_failed","original_snapshot":"test/.cache/config-original.json","evidence":["test/.cache/config-cleanup.json"]}]}
+{"type":"cleanup_state","event_id":"config-restored","resources":[{"kind":"shared_config","id":"config-1","status":"absence_verified","restored_snapshot":"test/.cache/config-restored.json","evidence":["test/.cache/config-readback.json"]}]}
+```
+
+对应`config-readback.json`含`resource_environment/kind/id/status/verified`及`"restored_snapshot":"test/.cache/config-restored.json"`，身份与事件一致。只有文件比较通过不代表已执行真实恢复或查询，adapter仍须保存其来源证据。
+
+设备状态清理按真实活动义务判断。never-started设备仅在owned证明完整且准确、初始状态为inactive、未尝试connect/send、全部transport已关闭且准确设备ID的数据回读为空时，跳过在线到离线转换屏障，不要求制造offline事件；后续资源删除和准确absence核验仍正常执行。存在真实活动或任一条件为unknown时，继续执行原有运行时清理与转换屏障。
+
+plan/claim实时检查索引，阻断原因是`resource_cleanup_unresolved`；已运行的CLI不自动终止，runner停止后续相关写派发。work_packages沿用schema_version=2及`cleanup_review_no_blind_retry`，派生`cleanup_unknown:true`并保留`residual_kinds`约束，权限门禁仍优先。工作包顶层可增加同一`resource_environment`，输出`residual_index_sha256`用于快照归属；新证据后生成新包，实际启动仍须claim重查，不直接执行旧包。
+
+报告按唯一资源而非DELETE次数统计。plan的`resource_residuals`分别给出`current_run_unresolved`（本轮首次登记且仍未决）、`historical_unresolved`（此前首次登记且仍未决）及两者之和`cumulative_unresolved`；`current_run_absence_verified/current_run_retained_verified`单列本轮核验关闭的资源，保留不计删除。本轮观察到的线上存量另列观察时间和范围，不与本轮新增或DELETE失败次数混算。历史导入须使用正确原始resource_run_id，否则首次登记归属不能代表真实创建轮次。
+
+错误证据保留必要的method/route、HTTP status、业务status及脱敏msg；先移除凭据、请求头、账号等敏感值。cleanup_state仅接受资源身份、状态和证据引用，不接收原始msg/响应体。索引及其未决/恢复证据（包括共享配置原值、恢复回读快照及来源证据）属于持续状态；跨run回收按[证据保护](#跨run证据与回收)显式保护。配置快照仅存授权范围内的可比较字段，不写入凭据。
+
+### 非checkpoint runner的强制pre-dispatch
+
+`workflow.py/workflow_tools.py attempt-init`不自动读取此索引。没有checkpoint.claim的runner（包括直接run-attempt.py路径）必须在每次产品CLI启动前调用下列门禁，非0退出码停止派发，不捕获后继续。在runner固定入口接入后，由调用者传入审核过的整批fixture资源scope；未声明时传仅含resource_environment的对象，在已有残留时fail closed。readonly必须明确声明，不根据用例名称猜测。门禁放行仅表示无残留冲突，不替代原授权/审批。
+
+```sh
+python3 "$SKILL/scripts/checkpoint.py" gate --project "$PROJECT" --input "$SCOPE" && \
+  python3 "$RUNNER" "$@"
+```
+
+`SCOPE`为`{"resource_environment":"稳定环境别名","resource_access":{"mode":"write","kinds":["device"],"dependencies":["product","category","protocol"]}}`；只读改为`mode:readonly`且两个数组为空。gate无需journal，读取项目同一持久索引，冲突输出`allowed:false`并退出2；只读/独立scope退出0。环境别名可取实际base_url去除userinfo后的origin之SHA256，保持所有run一致，不输出凭据。初始化现有历史残留是接入前置：先准确ID seed，再在新journal/runner路径核实写入拒绝、readonly放行；只有安装脚本而没有seed及pre-dispatch接入，不视为门禁生效。
+
 ## 按进展修复与失败确认
 
 失败清理核验后，record以下一种事件才重新进入pending：
