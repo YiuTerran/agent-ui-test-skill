@@ -141,8 +141,6 @@ runner在资源创建结果未决或清理失败时，立即调用`checkpoint.py
 
 对应`config-readback.json`含`resource_environment/kind/id/status/verified`及`"restored_snapshot":"test/.cache/config-restored.json"`，身份与事件一致。只有文件比较通过不代表已执行真实恢复或查询，adapter仍须保存其来源证据。
 
-设备状态清理按真实活动义务判断。never-started设备仅在owned证明完整且准确、初始状态为inactive、未尝试connect/send、全部transport已关闭且准确设备ID的数据回读为空时，跳过在线到离线转换屏障，不要求制造offline事件；后续资源删除和准确absence核验仍正常执行。存在真实活动或任一条件为unknown时，继续执行原有运行时清理与转换屏障。
-
 plan/claim实时检查索引，阻断原因是`resource_cleanup_unresolved`；已运行的CLI不自动终止，runner停止后续相关写派发。work_packages沿用schema_version=2及`cleanup_review_no_blind_retry`，派生`cleanup_unknown:true`并保留`residual_kinds`约束，权限门禁仍优先。工作包顶层可增加同一`resource_environment`，输出`residual_index_sha256`用于快照归属；新证据后生成新包，实际启动仍须claim重查，不直接执行旧包。
 
 报告按唯一资源而非DELETE次数统计。plan的`resource_residuals`分别给出`current_run_unresolved`（本轮首次登记且仍未决）、`historical_unresolved`（此前首次登记且仍未决）及两者之和`cumulative_unresolved`；`current_run_absence_verified/current_run_retained_verified`单列本轮核验关闭的资源，保留不计删除。本轮观察到的线上存量另列观察时间和范围，不与本轮新增或DELETE失败次数混算。历史导入须使用正确原始resource_run_id，否则首次登记归属不能代表真实创建轮次。
