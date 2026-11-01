@@ -58,7 +58,7 @@ Playwright setup project独立于自己生成的认证状态，业务project依�
 
 ### 固定身份复用与登录限流
 
-固定只读身份在应用会话有效且身份、权限和scope一致时复用，不以case、worker重启或teardown为理由重复登录。先查项目已有session provider；大量worker共用同一固定身份时，可在attempt协调进程内缓存登录Promise或使用受限本地broker，使失败后新worker仍复用已验证会话。缓存键覆盖环境/origin、租户、账号、登录方式及实际影响授权的组织scope；会修改会话组织或权限的身份独立隔离。不同身份或scope不能因账号同名共用token。
+固定身份在应用会话有效且身份、权限和scope一致时复用，不以case、worker重启或teardown为理由重复登录。固定指认证上下文不变，不要求账号只能查询；已授权的准备和清理操作也使用同一会话，但业务写入仍受各自资源门禁约束。先查项目已有session provider；大量worker共用同一固定身份时，可在attempt协调进程内缓存登录Promise或使用受限本地broker，使失败后新worker仍复用已验证会话。缓存键覆盖环境/origin、租户、账号、登录方式及实际影响授权的组织scope；会修改会话组织或权限的身份独立隔离。不同身份或scope不能因账号同名共用token。
 
 缓存生命周期覆盖所有消费者及global teardown，最后关闭并清除；不把token或broker密钥写入回执。需要刷新时按应用契约single-flight刷新，真实失效保留原错误。临时可变身份、授撤权后重新登录、会话失效与权限传播测试不使用固定身份缓存掩盖变化；具体刷新语义记录在项目spec，不把某个项目的重新登录要求推广到所有应用。
 
@@ -72,7 +72,7 @@ Playwright setup project独立于自己生成的认证状态，业务project依�
 
 应用有组织、租户、工作区等隔离层级时，当前上下文优先使用登录响应的默认值；可推导的根节点ID按项目真实初始化契约生成，并回读存在性、归属及启用状态。应用专属ID格式和权限码留在项目fixture及spec，通用模板仅记录约定。
 
-专用测试范围按应用实际隔离层级确定，可以是独立环境、租户、组织、工作区或项目。用户确认后，spec只记引用名（如profile或配置key），真实ID、账号、手机号等放Git忽略的配置文件或CI密钥，确认证据存`test/.cache/`；之后复用此授权，不要求额外独占开关或重复填写ID。该范围内共享配置可按原值恢复契约变更；没有已确认专用范围时，共享配置只读。用户另有整体清空独占数据域的明确授权时，按[专用域reset](cleanup.md)执行，授权列出准确scope、resource kinds及保护基线；名称或测试用途不证明独占。默认根组织、默认超管及管理员继续测试所需最小权限/应用授权作为基线保留，其他保护项按用户范围确定。tenant0共享元数据仅按准确owned证明清理，禁止reset。变更前以真实身份和服务响应核对允许范围，按环境、范围、配置项建立冲突组并跨worker/进程互斥。Agent任务之间使用调度`conflict_keys`（如`shared-config:<环境>/<范围引用名>/<配置项>`）；Playwright worker之间优先不用锁：把会改同组配置的case放进单独project或文件串行执行（`workers: 1`或serial模式）。确需跨进程互斥时，由项目fixture在`test/.cache/`下使用平台适配的系统级文件锁，优先复用已有跨平台封装（POSIX可用flock，Windows使用等价内核锁）。进程退出释放内核锁；锁文件保持稳定、记录持有者，不随元数据原子替换，也不因时间过期而删除或替换仍被持有的锁文件；基于mkdir/mtime过期判定的锁库不满足此要求。
+专用测试范围按应用实际隔离层级确定，可以是独立环境、租户、组织、工作区或项目。用户确认后，spec只记引用名（如profile或配置key），真实ID、账号、手机号等放Git忽略的配置文件或CI密钥，确认证据存`test/.cache/`；之后复用此授权，不要求额外独占开关或重复填写ID。该范围内共享配置可按原值恢复契约变更；没有已确认专用范围时，共享配置只读。用户另有整体清空独占数据域的明确授权时，按[专用域reset](cleanup.md)执行，授权列出准确scope、resource kinds及保护基线；名称或测试用途不证明独占。保护基线由用户确认，以准确ID及回读保留测试所需身份、权限和其他指定项，不预设组织层级或管理员角色。共享/系统数据域按项目配置及真实归属确认，仅按准确owned证明清理，禁止reset，不从名称或ID推定独占。变更前以真实身份和服务响应核对允许范围，按环境、范围、配置项建立冲突组并跨worker/进程互斥。Agent任务之间使用调度`conflict_keys`（如`shared-config:<环境>/<范围引用名>/<配置项>`）；Playwright worker之间优先不用锁：把会改同组配置的case放进单独project或文件串行执行（`workers: 1`或serial模式）。确需跨进程互斥时，由项目fixture在`test/.cache/`下使用平台适配的系统级文件锁，优先复用已有跨平台封装（POSIX可用flock，Windows使用等价内核锁）。进程退出释放内核锁；锁文件保持稳定、记录持有者，不随元数据原子替换，也不因时间过期而删除或替换仍被持有的锁文件；基于mkdir/mtime过期判定的锁库不满足此要求。
 
 每次变更按[资源账本](contracts.md#resourcehumandelegation)登记`kind=shared_config`，脚本强制以下规则：intent必带`config_key`和`original_snapshot`（`test/.cache/`下的原值JSON）；变更成功后confirmed，owned=true，receipt为变更响应；恢复后回读存为JSON，absence_verified必带`restored_snapshot`，与原值的规范化JSON一致才接受。回读不一致时资源保持confirmed，残留建议为restore，并登记environment issue；同组后续写入先恢复回读再继续，不依赖进程退出后的锁表达未恢复。跨机器运行协调相同时段，或使用各方都能访问的锁。与其他使用方共用的范围（如共享系统租户、无隔离的单一环境）不变更配置；其中已授权的本轮专用数据仍按owned规则准备和清理。
 

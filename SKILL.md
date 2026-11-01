@@ -1,6 +1,6 @@
 ---
 name: ego-lite-playwright-e2e
-description: Maintain traceable Web E2E coverage with ego-lite and Playwright. Add user-selected coverage, rerun existing tests, or diagnose and fix reported failures within the authorized scope. Not for standalone API/unit testing or one-off page inspection.
+description: Maintain traceable Web E2E coverage with ego-lite and Playwright. Add user-selected coverage, rerun tests, diagnose failures, and deliver reports; repair test tooling as needed. Not for standalone API/unit testing or one-off page inspection.
 ---
 
 # Ego-lite与Playwright E2E
@@ -17,11 +17,13 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 - **检查变更以回答变更为止**：取得当前来源，与同口径基线比较版本及可靠内容指纹；有变化则给出相关差异，不自动扩展到用例重审、补齐覆盖或业务修改。不可读或缺少可比基线时如实报告无法确认。
 - **Agent处理不确定性，程序执行固定流程**：范围和完成标准明确后，直接交项目runner或组合命令连续完成；需求语义、预期、探索及代码/bug问题才交Agent。确定性流程不按步骤派Agent，不重新规划、扩大范围或降低断言。
 - **框架问题由主Agent自行排障续跑**：执行已获准测试时，测试框架、fixture、runner、报告适配或过期恢复标记的局部修复属于完成任务的一部分，不为每次修复再次征询。主Agent核实实际状态、修复并验证后继续；交回Agent不等于交回用户。只有确实缺授权、业务决策或安全恢复依据才请求用户，具体边界见[框架自修复与自动解阻](references/workflow.md#框架自修复与自动解阻)。
-- **失败先查相关代码，确诊后不反复重跑**：自动化未通过时，优先结合已有失败证据，定点核查可找到的前后端实现及测试/fixture；HTTP 400/500等错误响应或业务错误码优先查相关服务端处理链，不先复跑或默认归为环境问题。没有源码不阻塞诊断。证据足以确认bug就登记并继续其他目标，不为重复确认同一问题消耗CLI和token。仓库代码与测试环境分开判断：源码未发现问题或已修复，不代表线上已修复；部署版本未知时保留实际失败及版本限制。见[代码与部署版本分流](references/reports.md#失败先核代码与部署版本)。
+- **失败先查相关代码，确诊后不反复重跑**：自动化未通过时，优先结合已有失败证据，定点核查可找到的前后端实现及测试/fixture；HTTP 400/500等错误响应或业务错误码优先查相关服务端处理链，不先复跑或默认归为环境问题。没有源码不阻塞诊断。证据足以确认bug就登记并继续其他目标，不为重复确认同一问题消耗CLI和token。仓库代码与测试环境分开判断：源码未发现问题或已修复，不代表线上已修复；部署版本未知时保留实际失败及版本限制。见[代码与部署版本分流](references/reports.md#失败先核代码与部署版本)。诊断接口、页面或异步流程时，按需核对[契约与观测](references/reports.md#诊断中的契约与观测)。
 
 ## 何时使用
 
-适用于Web测试覆盖、已有自动化回归，以及由E2E报告驱动的测试维护或获准业务修复。独立API/单元测试、一次性页面查看和无关产品修复直接使用对应工具，不初始化本工作流。
+适用于Web测试覆盖、已有自动化回归、失败诊断、测试维护和报告交付。独立API/单元测试、一次性页面查看及业务修复使用对应工具，不为此初始化本工作流。
+
+默认职责是测试、诊断和报告。执行获准测试所必需的测试脚本、框架、fixture、runner和报告工具修复可自主完成，不逐次请求许可；仅包含测试用途且不改变业务行为的代码才属于此范围，不能仅凭目录或文件名判断。修改业务代码、业务配置或部署脚本以修复产品，以及实际部署，均须有用户明确授权；确诊bug、生成工作包或普通“继续测试”不构成这些授权。获准业务修复交由对应开发流程，完成后回到测试；修复授权不包含提交、推送、发布或部署，已有相应明确授权可复用。新增业务场景仍须用户选择覆盖范围；已批准数据范围内的测试准备和清理沿用原授权。
 
 ## 首次接入与用户引导
 
@@ -42,7 +44,7 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 | 新增下一组、补齐覆盖 | 盘点模块缺口→确认新增范围→探索/编码→受影响验证→收尾全量 | [工作流](references/workflow.md#覆盖缺口门禁与模块补全) |
 | 已部署再跑、只回归、不新增、跳过前置直接跑 | 锁定目标→一次发现校验→执行→结果与清理；沿用既有预期 | [确定性任务](references/workflow.md#确定性任务直接完成) |
 | 确认需求是否变更 | 当前来源快检→同口径比较→报告变化或无法确认 | [确定性任务](references/workflow.md#确定性任务直接完成) |
-| 根据报告修复、优化失败测试、落实已批准修复方案 | 复用失败证据→定点定位→修复→本地受影响验证；仅获准且环境已更新时进入真实E2E | [按报告修复](references/workflow.md#按报告修复快车道) |
+| 分析失败报告、优化失败测试 | 复用失败证据→区分测试与产品缺陷→修复测试工具并验证；业务缺陷登记报告，另行获准修复且环境更新后再复测 | [按报告修复](references/workflow.md#按报告修复快车道) |
 
 未指定路径的“开始测试”默认已有回归；尚无测试体系时先引导接入，不推定用户批准全部新增覆盖。新增覆盖需用户选择。混合请求按实际依赖衔接，用户已确认的本轮范围直接复用。执行回归保留身份、数据安全和原始结果证据；需求验收再核对来源有效性及覆盖资格。只读取当前路径需要的参考章节，不一次加载所有契约和脚本实现。
 
@@ -53,6 +55,7 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 - **一次准备，连续执行**：从现有run/交接/项目runner取已知输入，必要读操作合批。每个连续确定性区间默认一次宿主调用完成；有依赖的动作在同一程序中顺序运行，无冲突的读取并行。长CLI返回会话句柄后接续等待，不在每步之间重新推理或征询。
 - **组合入口优先**：已有真实CLI回执用`attempt-collect`一次生成bundle并采集；全部CLI就绪后用`finalize`一次完成必要原生merge、最终事件、报告核验和释放。已有登记merge直接复用。正常路径不再分开调用对应底层命令；详见[批量入口](references/local-tools.md#确定性批量入口)。
 - **最小输入输出**：正常只读取run/owner、选择范围、必要环境/资源绑定、真实退出码、结果差异和下一命令字段。完整状态、哈希清单、附件副本、历史issue留在文件。不要把大JSON打印后再让模型提取，不复制多份交接摘要；只对受影响证据做一次定点诊断。
+- **归并失败，按版本复测**：按根因归并失败和受影响目标，分别记录测试维护、产品缺陷及环境版本。业务修复与部署交由相应获准流程，不能为完成测试自行发布。环境更新后按本轮约定选择增量复测或当前版本完整验收，复用仍有效的观察。见[外部修复与部署后的复测](references/workflow.md#外部修复与部署后的复测)。
 - **执行前由程序检查**：使用真实选择参数的`--list`核对非空业务目标及Setup，再准备Attempt；选择条件或相关代码未变时复用该发现。一次验证环境/资源绑定、当前marker和配额请求字段；缺项在启动浏览器前失败。探索结束并完成清理后立即释放其配额；仍在运行的探索按真实占用给CLI预留余量，不提前释放或反复申请。凭据不进入回执或对话；登记失败复用原始产物，不重跑业务。
 - **恢复与结束**：用真实checkpoint/会话接回未完成步骤；通过步骤在输入未变时复用。用户选择增量续跑时，按[断点完成标准](references/checkpoints.md#增量任务的完成标准)收尾，不为formal full字段另跑全量；执行完成、产品全部通过和需求全覆盖分别判断。组合命令成功即交付，不再跑status、逐case扫描、资源副本遍历或重新生成报告。失败先暂停受影响派发并保留安全清理所需占用，由主Agent按自修复路径恢复；能自行解决就续跑，不以“已记录阻塞”代替完成任务。确实无法推进时才交付出错阶段、证据和所需外部动作。
 
@@ -92,7 +95,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 完整回归核对需求→case→实际独立test；新增场景的探索、测试及所需fixture以用户对缺口清单的明确选择为前置。普通“开始测试/执行全部测试”只授权盘点及已有回归；沉默、超时和历史用例审核均不构成新增授权。明确只回归直接记录本轮跳过新增；定向修复仅核对受影响映射，不冒充完整需求覆盖。清单外新缺口再次确认，同轮清单内的有效授权直接复用。
 - 用户选择跳过或仅新增部分模块时，保留剩余缺口及决定证据，报告区分本轮新增范围、现有自动化执行与需求覆盖。
 - 需求决定预期，浏览器说明实际行为。业务差异保留证据；业务代码修复需另有授权。
-- 既有业务数据默认只读，共享数据按准确owned证明逆依赖清理；未知创建结果不重试、不猜测删除。用户明确授权整体重置的独占数据域，按获准resource kinds及当前完整盘点执行reset，旧unknown缺逐条receipt不阻挡此恢复路径；保留准确保护基线，tenant0共享元数据禁止reset。日常case cleanup与轮末独立scope sweep均实际执行，reset仅凭完整scope absence及实际cleanup_state桥接关闭相关unknown/残留；停源、互斥、分页、依赖及retained规则见[清理与专用域reset](references/cleanup.md)。范围内共享配置按原值恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
+- 既有业务数据默认只读，共享数据按准确owned证明逆依赖清理；未知创建结果不重试、不猜测删除。用户明确授权整体重置的独占数据域，按获准resource kinds及当前完整盘点执行reset，旧unknown缺逐条receipt不阻挡此恢复路径；保留用户确认的准确保护基线；项目确认的共享/系统数据域禁止reset，不从域名或ID推定隔离性。日常case cleanup与轮末独立scope sweep均实际执行，reset仅凭完整scope absence及实际cleanup_state桥接关闭相关unknown/残留；停源、互斥、分页、依赖及retained规则见[清理与专用域reset](references/cleanup.md)。范围内共享配置按原值恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
 - 清理未决立即通过checkpoint的`cleanup_state`增量登记跨run索引，按稳定环境、kind、准确ID去重，阻断相关写资源包和后续claim；明确只读或无相关资源依赖的case继续。恢复凭匹配资源的absence/retained_verified回读证据，不以test passed、close或普通unblock解除。报告分别列单轮残留、历史累计和本轮清理数量；错误msg先脱敏，见[跨run残留门禁](references/checkpoints.md#跨run残留门禁)。
 - 所有runner启动产品CLI前必须通过残留门禁：使用checkpoint的重新claim，或调用`checkpoint.py gate`并检查退出码。`workflow attempt-init`本身不读取残留索引，非checkpoint runner必须在pre-dispatch接入gate；未知写scope在已有残留时fail closed，明确readonly可继续。升级脚本、生成工作包或成功attempt-init均不代表已接入。
 - 独立case并行、共享资源按账号/组织/配置/数据冲突组局部串行。执行前领取共享配额，teardown后释放；资源信息不足从一个浏览器任务开始。

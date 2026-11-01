@@ -122,7 +122,7 @@ runner在资源创建结果未决或清理失败时，立即调用`checkpoint.py
 
 恢复审核在派发前保存不可变快照，计划引用该快照及全部原始证据的准确路径和哈希。并行Agent的fixture验证、追加诊断写入新sidecar，不改写已被恢复计划或journal引用的审核文件；恢复结束核对证据未变。原件字节缺失时保留缺失边界，不用摘要或重新序列化冒充原件。
 
-用户明确授权的独占数据域整体reset按[清理流程](cleanup.md)执行：授权scope和resource kinds内的当前完整盘点可覆盖原创建结果unknown，缺逐条旧receipt不一概阻断恢复；tenant0等共享域仍按准确owned规则。普通case写派发门禁保持生效，恢复动作在原授权及互斥内进行，不借修改scope绕过。只有停源后各获准删除集合全分页归零、保护基线回读及运行时义务核验完成，才能生成scope absence。adapter将该证明映射到原环境/准确租户及kind下的相关ID或原unknown义务，实际提交cleanup_state并回读索引；不能静默清索引、改原账本或以test passed结案。现有接口仍逐准确ID/义务处理，未可靠实现scope证明映射的adapter保留阻塞；此说明不新增原生scope-reset命令或字段。
+用户明确授权的独占数据域整体reset按[清理流程](cleanup.md)执行：授权scope和resource kinds内的当前完整盘点可覆盖原创建结果unknown，缺逐条旧receipt不一概阻断恢复；项目确认的共享/系统数据域仍按准确owned规则，保护基线由用户确认。普通case写派发门禁保持生效，恢复动作在原授权及互斥内进行，不借修改scope绕过。只有停源后各获准删除集合全分页归零、保护基线回读及运行时义务核验完成，才能生成scope absence。adapter将该证明映射到原环境/准确租户及kind下的相关ID或原unknown义务，实际提交cleanup_state并回读索引；不能静默清索引、改原账本或以test passed结案。现有接口仍逐准确ID/义务处理，未可靠实现scope证明映射的adapter保留阻塞；此说明不新增原生scope-reset命令或字段。
 
 恢复仍走同一事件：status改为`absence_verified`，evidence中的JSON回读回执须匹配环境、kind、id、status，并含严格布尔值`verified:true`：
 
@@ -184,6 +184,7 @@ checkpoint始终输出`formal_regression_completeness=not_evaluated`。它解决
 - 已执行失败并已充分确诊的产品问题属于执行结论，不是未编用例；报告具体未到达分支，产品修复不自动纳入测试目标
 - 未观察目标、脚本不可用、未绑定日志、资源未决及API归属分别保留；用户已确认的排除/暂缓不继续当作未解决输入反复追问
 - 对仅有旧日志的目标，先查原生JSON、sidecar及可用中间产物。能合法绑定就复用；仍无法确定最终结果且目标仍在授权范围时，仅补跑受影响目标，不凭日志推断通过或重跑整批
+- issue按具体缺陷及证据分别结案：同一case中的业务执行、编辑交互、清理和证据绑定可能是独立问题。后续通过只关闭实际覆盖且有对应证据的缺陷，不因主流程通过批量关闭未验证分面；独立补证充分时也不为改写旧native再跑整例。完成审计核对授权范围内的未编、未观察及未决义务，另列业务修复和环境部署状态，不将已有结论反复扩成新测试项目。
 - 最终交付一份当前结果索引和剩余工作清单；后续更新同一入口，旧尝试保留在原路径，不逐批生成多套重复盘点和长期历史段落
 
 ### 跨run证据与回收
@@ -209,13 +210,13 @@ python3 "$SKILL/scripts/work_packages.py" --project "$PROJECT" \
 
 ### 输出action与runner路由
 
-`category`是输入分类，枚举保持不变；以下是输出`packages[].action`。runner先检查顶层`schema_version`，当前为`2`；不支持的版本或未知action停止自动派发并报告，不回退到执行测试。权限和清理门禁优先于category路由。action是下一项工作，不全部代表用户等待：`repair_then_affected`、`cleanup_review_no_blind_retry`和`review_environment_state`交主Agent自行修复/只读核实；`awaiting_authorization`只用于核对既有授权后仍确实缺权限的情况，不为方便执行直接清除输入标志。取得新证据后保留旧包并重新归一化生成新包，门禁满足后续跑。
+`category`是输入分类，枚举保持不变；以下是输出`packages[].action`。runner先检查顶层`schema_version`，当前为`2`；不支持的版本或未知action停止自动派发并报告，不回退到执行测试。权限和清理门禁优先于category路由。action是下一项工作建议，不生成额外授权，也不全部代表用户等待：`repair_then_affected`中的测试工具维护默认由主Agent处理，业务修改及部署仍需对应明确授权；`cleanup_review_no_blind_retry`和`review_environment_state`按原数据权限及证据核实；`awaiting_authorization`只用于核对既有授权后仍确实缺权限的情况，不为方便执行直接清除输入标志。取得新证据后保留旧包并重新归一化生成新包，门禁满足后续跑。
 
 | 条件（按优先级） | 输出action | runner下一步 |
 | --- | --- | --- |
 | `permission_required:true` | `awaiting_authorization` | 等待相应授权 |
 | `cleanup_unknown:true`或category为`cleanup_unknown` | `cleanup_review_no_blind_retry` | 核清资源和清理义务 |
-| category为`script` | `repair_then_affected` | 诊断并修复已授权的测试问题，验证受影响目标 |
+| category为`script` | `repair_then_affected` | 自主诊断修复测试工具问题并验证受影响目标；不得据此修改业务代码 |
 | category为`environment`，缺省`environment_changed` | `review_environment_state` | 状态未知；只读核实相关故障条件，不启动确认复跑 |
 | category为`environment`，`environment_changed:false` | `awaiting_environment_change` | 已知故障条件未变；等待相关恢复证据 |
 | category为`environment`，`environment_changed:true` | `diagnose_dependency_before_retry` | 依据变化证据核实当前依赖，满足原门禁后再决定是否确认 |
