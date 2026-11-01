@@ -116,13 +116,21 @@ runner在资源创建结果未决或清理失败时，立即调用`checkpoint.py
 
 自动`cleanup_state`桥接由runner在创建结果未决及清理结果产生时实际执行：归一化准确资源ID、状态和证据，调用`checkpoint.py record`并检查退出码，在下一次相关写派发前确认索引已持久化；桥接失败时保留证据并阻断相关写操作。手工seed用于历史初始化，持续接入以实际桥接调用回执及索引回读为依据，仅seed加gate不代表自动桥接已生效。
 
+资源producer接入或变更时，维护项目的规范账本适配清单，覆盖业务资源、临时身份及授权关系、规则/脚本、消息资源池和运行时数据义务。使用真实producer结构做离线契约测试，同时验证清理依赖消费者与残留桥接；runner终止补登复用此清单，避免仅扫描一种文件名或schema漏债。引用式账本的ID不重复计物理资源，停源/数据缺席与实体删除分别对账；消费者只接受规范数组时，由producer输出有绑定的独立cleanup gate，成功值由全部停源、数据清理及连接释放结果决定。旧格式缺字段不能直接补成功，恢复使用原件哈希及独立准确回读证明。
+
+清理按依赖图推进：父资源等待准确子资源解除；一个分支失败后，仍收敛在途操作并清理已证明独立、安全的其他分支，保留所有失败与未决状态。例如规则失败不应跳过无引用且归属已核验的脚本。清理回归至少覆盖部分失败、unknown创建、依赖未解除、旧schema和连接释放失败，不以单个`cleanupComplete`标志代替完整证明。
+
+恢复审核在派发前保存不可变快照，计划引用该快照及全部原始证据的准确路径和哈希。并行Agent的fixture验证、追加诊断写入新sidecar，不改写已被恢复计划或journal引用的审核文件；恢复结束核对证据未变。原件字节缺失时保留缺失边界，不用摘要或重新序列化冒充原件。
+
+用户明确授权的独占数据域整体reset按[清理流程](cleanup.md)执行：授权scope和resource kinds内的当前完整盘点可覆盖原创建结果unknown，缺逐条旧receipt不一概阻断恢复；tenant0等共享域仍按准确owned规则。普通case写派发门禁保持生效，恢复动作在原授权及互斥内进行，不借修改scope绕过。只有停源后各获准删除集合全分页归零、保护基线回读及运行时义务核验完成，才能生成scope absence。adapter将该证明映射到原环境/准确租户及kind下的相关ID或原unknown义务，实际提交cleanup_state并回读索引；不能静默清索引、改原账本或以test passed结案。现有接口仍逐准确ID/义务处理，未可靠实现scope证明映射的adapter保留阻塞；此说明不新增原生scope-reset命令或字段。
+
 恢复仍走同一事件：status改为`absence_verified`，evidence中的JSON回读回执须匹配环境、kind、id、status，并含严格布尔值`verified:true`：
 
 ```json
 {"resource_environment":"tenant-dev","kind":"category","id":"70","status":"absence_verified","verified":true}
 ```
 
-`retained_verified`还要求事件和回执的`retention`一致且为`pooled/disabled`，保留结果须满足原资源账本及授权要求。回执由runner依据实际absence查询或保留状态回读生成，附相应来源证据；工具核验匹配字段，不代替真实查询。test passed、close.cleanup_verified或普通依赖unblock均不改变此索引。仅关闭已核验的准确ID，同kind其他残留继续阻断。
+`retained_verified`还要求事件和回执的`retention`一致且为`pooled/disabled`，保留结果须满足原资源账本及授权要求。回执由runner依据实际absence查询或保留状态回读生成，附相应来源证据；工具核验匹配字段，不代替真实查询。test passed、close.cleanup_verified或普通依赖unblock均不改变此索引。共享owned路径仅关闭已核验的准确ID；专用reset路径须以完整scope absence映射到原残留义务后逐项关闭，scope外或映射不明的同kind残留继续阻断。
 
 `shared_config`不允许保留关闭，也不能仅凭通用`verified:true`回执关闭。adapter须先在未决事件中以`original_snapshot`引用资源账本中真实、修改前的原值JSON；工具固定路径并计算规范化JSON的SHA256，后续跨run登记不得替换路径、清空基线或改写原件。历史原值暂缺时可先登记未决以阻断，但不能拿当前值冒充原值，也不能在关闭事件中首次补造基线。恢复后以`absence_verified`关闭（此处表示原值恢复，并非删除配置），事件另带`restored_snapshot`指向实际恢复后回读JSON，且匹配回执必须引用同一`restored_snapshot`。工具核验恢复值与已固定原值的规范化JSON一致；其他kind不接受这两个快照字段。例如先登记原值，再恢复回读后关闭：
 

@@ -92,7 +92,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 完整回归核对需求→case→实际独立test；新增场景的探索、测试及所需fixture以用户对缺口清单的明确选择为前置。普通“开始测试/执行全部测试”只授权盘点及已有回归；沉默、超时和历史用例审核均不构成新增授权。明确只回归直接记录本轮跳过新增；定向修复仅核对受影响映射，不冒充完整需求覆盖。清单外新缺口再次确认，同轮清单内的有效授权直接复用。
 - 用户选择跳过或仅新增部分模块时，保留剩余缺口及决定证据，报告区分本轮新增范围、现有自动化执行与需求覆盖。
 - 需求决定预期，浏览器说明实际行为。业务差异保留证据；业务代码修复需另有授权。
-- 既有业务数据只读。专用E2E资源按intent→准确ID/owned证明→逆依赖清理→absence check处理，应用不支持删除时回到基线放回复用池或禁用并回读，登记retained_verified；未知创建结果不得重试或猜测删除。唯一例外是用户已确认的专用测试范围内的共享配置（影响同范围其他用户或case的设置）：须跨worker/进程互斥、按资源账本登记原值、恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
+- 既有业务数据默认只读，共享数据按准确owned证明逆依赖清理；未知创建结果不重试、不猜测删除。用户明确授权整体重置的独占数据域，按获准resource kinds及当前完整盘点执行reset，旧unknown缺逐条receipt不阻挡此恢复路径；保留准确保护基线，tenant0共享元数据禁止reset。日常case cleanup与轮末独立scope sweep均实际执行，reset仅凭完整scope absence及实际cleanup_state桥接关闭相关unknown/残留；停源、互斥、分页、依赖及retained规则见[清理与专用域reset](references/cleanup.md)。范围内共享配置按原值恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
 - 清理未决立即通过checkpoint的`cleanup_state`增量登记跨run索引，按稳定环境、kind、准确ID去重，阻断相关写资源包和后续claim；明确只读或无相关资源依赖的case继续。恢复凭匹配资源的absence/retained_verified回读证据，不以test passed、close或普通unblock解除。报告分别列单轮残留、历史累计和本轮清理数量；错误msg先脱敏，见[跨run残留门禁](references/checkpoints.md#跨run残留门禁)。
 - 所有runner启动产品CLI前必须通过残留门禁：使用checkpoint的重新claim，或调用`checkpoint.py gate`并检查退出码。`workflow attempt-init`本身不读取残留索引，非checkpoint runner必须在pre-dispatch接入gate；未知写scope在已有残留时fail closed，明确readonly可继续。升级脚本、生成工作包或成功attempt-init均不代表已接入。
 - 独立case并行、共享资源按账号/组织/配置/数据冲突组局部串行。执行前领取共享配额，teardown后释放；资源信息不足从一个浏览器任务开始。
@@ -104,6 +104,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 ## 按需参考
 
 - 输入准备、恢复与覆盖补全：[工作流](references/workflow.md)
+- case清理、轮末sweep及已授权专用域reset：[清理](references/cleanup.md)
 - 事件字段、CLI、平台和缓存回收契约：[契约](references/contracts.md)
 - Playwright输出、绑定、报告合并：[报告绑定](references/reports.md)
 - 实际ego-lite、认证和人工等待：[浏览器与认证](references/browser-and-auth.md)及当前安装的ego-browser技能
