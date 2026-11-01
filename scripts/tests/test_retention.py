@@ -120,6 +120,32 @@ class RetentionTest(unittest.TestCase):
             self.assertTrue(item['recycled_at'])
             self.assertEqual(['a'], item['original']['scopes'])
 
+    def test_checkpoint_attempt_path_protects_native_bundle_not_only_index(self):
+        index = 'test/.cache/checkpoint-latest.json'
+        self.write(index, {'latest': [{'native': self.raw_path}]})
+        self.spec['retention'] = {
+            'protected_paths': [self.prefix + '/attempts/B'],
+        }
+        self.write('test/spec.md', '```json workflow-config\n'
+                   + json.dumps(self.spec) + '\n```\n')
+        plan = self.plan()
+        self.assertTrue({self.raw_path, self.html, self.trace, self.noise}.isdisjoint(
+            self.paths(plan)))
+        self.assertTrue(any(item['reason'] == 'configured_reference'
+                            and item['path'] == self.prefix + '/attempts/B'
+                            for item in plan['diagnostics']['protections']))
+        r.apply_plan(self.project, plan)
+        for path in (self.raw_path, self.html, self.trace):
+            self.assertTrue((self.project / path).is_file())
+
+    def test_custom_checkpoint_index_reference_does_not_recursively_pin_native(self):
+        index = 'test/.cache/checkpoint-latest.json'
+        self.write(index, {'latest': [{'native': self.raw_path}]})
+        self.spec['retention'] = {'protected_paths': [index]}
+        self.write('test/spec.md', '```json workflow-config\n'
+                   + json.dumps(self.spec) + '\n```\n')
+        self.assertIn(self.raw_path, self.paths(self.plan()))
+
     def pool_ledger(self, status='available'):
         baseline = self.prefix + '/attempts/B/results/output/pool-baseline.json'
         recovery = self.prefix + '/attempts/B/results/output/pool-quarantine.json'

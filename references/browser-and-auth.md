@@ -56,6 +56,14 @@ ego-lite会话、browser ref与Playwright context不自动互通。通过本地�
 
 Playwright setup project独立于自己生成的认证状态，业务project依赖该setup。正常运行保留依赖；`--list`只有发现意义，`--no-deps`不验证setup。按角色/worker分离状态路径，支持时限制文件权限。
 
+### 固定身份复用与登录限流
+
+固定只读身份在应用会话有效且身份、权限和scope一致时复用，不以case、worker重启或teardown为理由重复登录。先查项目已有session provider；大量worker共用同一固定身份时，可在attempt协调进程内缓存登录Promise或使用受限本地broker，使失败后新worker仍复用已验证会话。缓存键覆盖环境/origin、租户、账号、登录方式及实际影响授权的组织scope；会修改会话组织或权限的身份独立隔离。不同身份或scope不能因账号同名共用token。
+
+缓存生命周期覆盖所有消费者及global teardown，最后关闭并清除；不把token或broker密钥写入回执。需要刷新时按应用契约single-flight刷新，真实失效保留原错误。临时可变身份、授撤权后重新登录、会话失效与权限传播测试不使用固定身份缓存掩盖变化；具体刷新语义记录在项目spec，不把某个项目的重新登录要求推广到所有应用。
+
+若环境有已知登录限流，由统一调度器约束首次登录/必要重新登录，留出Setup及清理余量，不把固定配额数字写成通用默认。429先按脱敏响应和合法Retry-After诊断，阻止相关后续登录派发；不让每个worker独立重试，不用重新登录清理全部历史账本，不绕过限流。API会话复用仍需独立证明fresh浏览器上下文已认证。
+
 在没有ego-lite或交互登录参与的fresh headless context验证bootstrap。只有exploration或人工本地能力时，可完成相应授权工作，同时报告无人值守自动化仍受阻。
 
 ## 测试身份与共享配置

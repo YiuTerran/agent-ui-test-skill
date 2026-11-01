@@ -283,6 +283,8 @@ project用真实规范路径，导出计划放项目test目录外；内部注册
 | 混合模块 | bundle/merged全部scope符合才回收；通用目录说明或.gitignore输出不是保护引用 |
 | 路径安全 | 路径逃逸、symlink、文件替换及Windows别名/句柄边界继续拒绝；无可靠归属/范围或白名单外局部保留，不用glob猜删 |
 
+跨run续跑可在workflow-config的`retention.protected_paths`列出仍复用的具体attempt/merge目录，配置路径由现有`configured_reference`机制保护；它不是递归解析任意索引的开关。保护集无法完整枚举时用`retention.before_regression=false`跳过自动回收。该字段不会阻止显式调用手工plan/apply，手工回收仍需核对依赖。实际保护方式见[断点证据](checkpoints.md#跨run证据与回收)。
+
 plan/apply的diagnostics包含candidate_files、selected_files、protected_files、zero_reason、protections、excluded_files_by_reason。candidate=selected+protected，不能重叠；protections含path/source_file/field/reason/files/sample_paths（最多3条），说明首个匹配保护及来源；excluded_files_by_reason说明候选前排除。
 
 身份池证据的保护来源为`identity_pool_reference`；仅扫描当前引用及尚未解除隔离的必要历史证据，不永久保护全部历史记录。计划同时固定池账本快照；计划生成后账本新增、删除或修改均拒绝apply，须核实后重新规划。先回收（prepare-regression或plan/apply），再租号执行；租用、归还及请求回收都使旧计划失效，不在runner执行期间预存计划待后用。
