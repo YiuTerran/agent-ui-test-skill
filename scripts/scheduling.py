@@ -475,7 +475,7 @@ def locked_ledger(project):
     directory = project
     for name in ('test', '.cache', 'scheduling'):
         directory = directory / name
-        directory.mkdir(exist_ok=True)
+        platform_support.ensure_directory(directory)
         # Resolving missing Windows paths can retain \\?\ when another process
         # creates a parent mid-resolution. Check each existing component instead.
         check(directory.resolve(strict=True).is_relative_to(project),

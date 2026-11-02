@@ -28,6 +28,75 @@ def symlink(test, path, target, target_is_directory=False):
 
 
 class PlatformTest(unittest.TestCase):
+    def test_version_gate_accepts_minimum_and_newer_and_rejects_older_python(self):
+        for version in [(3, 8, 20), (3, 9, 21), (3, 10, 0), (3, 13, 0), (3, 14, 0)]:
+            with self.subTest(version=version), mock.patch.object(p.sys, 'version_info', version):
+                if version[:2] < (3, 10):
+                    with self.assertRaisesRegex(SystemExit, 'requires Python 3.10'):
+                        p.require_supported_python()
+                else:
+                    p.require_supported_python()
+
+    def test_cli_entrypoints_reject_old_interpreter_without_tracebacks(self):
+        code = (
+            'import runpy, sys; sys.argv = [sys.argv[1], "--help"]; '
+            'sys.version_info = (3, 9, 21, "final", 0); '
+            'runpy.run_path(sys.argv[0], run_name="__main__")')
+        for entry in ['workflow.py', 'scheduling.py', 'checkpoint.py', 'work_packages.py',
+                      'retention.py', 'source_cache.py', 'import_results.py', 'runtime_probe.py']:
+            with self.subTest(entry=entry):
+                path = MODULE.with_name(entry)
+                result = subprocess.run([sys.executable, '-c', code, str(path)],
+                                        cwd=MODULE.parent, capture_output=True, text=True, timeout=20)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn('requires Python 3.10+', result.stderr)
+                self.assertIn('3.9.21', result.stderr)
+                self.assertIn(sys.executable, result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertEqual('', result.stdout)
+
+    def test_old_interpreter_cannot_initialize_project_assets(self):
+        code = (
+            'import runpy, sys; script = sys.argv.pop(1); '
+            'sys.version_info = (3, 9, 21, "final", 0); '
+            'runpy.run_path(script, run_name="__main__")')
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run([sys.executable, '-c', code, str(MODULE.with_name('workflow.py')),
+                                     'init', '--project', temp], cwd=MODULE.parent,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn('requires Python 3.10+', result.stderr)
+            self.assertEqual([], list(Path(temp).iterdir()))
+
+    def test_directory_helper_handles_broker_eexist_for_existing_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with mock.patch.object(Path, 'mkdir', side_effect=FileExistsError):
+                p.ensure_directory(root)
+                with self.assertRaises(FileExistsError):
+                    p.ensure_directory(root / 'missing')
+            existing_file = root / 'file'
+            existing_file.touch()
+            with self.assertRaises(FileExistsError):
+                p.ensure_directory(existing_file)
+
+    def test_directory_helper_preserves_denied_creation_and_concurrent_creation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'directory'
+            mkdir = Path.mkdir
+
+            def concurrently_created(path, **options):
+                mkdir(path, **options)
+                raise FileExistsError()
+
+            with mock.patch.object(Path, 'mkdir', concurrently_created):
+                p.ensure_directory(target)
+            self.assertTrue(target.is_dir())
+            with mock.patch.object(Path, 'mkdir', side_effect=PermissionError):
+                p.ensure_directory(target)
+                with self.assertRaises(PermissionError):
+                    p.ensure_directory(target / 'missing')
+
     def test_portable_relative_names_reject_windows_aliases_on_every_host(self):
         for value in ['../a', '/a', 'a//b', 'a\\b', 'C:relative', 'C:/absolute',
                       '//server/share', 'a:stream', 'a.', 'a ', 'CON', 'nul.txt',

@@ -50,7 +50,7 @@ def merge_reports(wf, project, state, request):
     wf.check(bundles, 'merge requires registered bundles')
     tools = sibling('workflow_tools')
     root = tools.safe_cache(wf, project, f"test/.cache/runs/{state['run_id']}/merged/playwright")
-    root.mkdir(parents=True, exist_ok=True)
+    wf.platform_support.ensure_directory(root, parents=True)
     directory = Path(tempfile.mkdtemp(prefix='batch-', dir=root))
     inputs = directory / 'input'
     inputs.mkdir()

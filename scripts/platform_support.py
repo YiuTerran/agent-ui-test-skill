@@ -4,13 +4,38 @@ import ctypes
 import errno
 import os
 from pathlib import Path, PureWindowsPath
+import sys
 import time
+
+MIN_PYTHON_VERSION = (3, 10)
+
+
+def require_supported_python():
+    if sys.version_info[:2] < MIN_PYTHON_VERSION:
+        version = '.'.join(str(part) for part in sys.version_info[:3])
+        raise SystemExit('ego-lite-playwright-e2e requires Python 3.10+; detected '
+                         + version + ' at ' + sys.executable
+                         + '. Use a compatible interpreter for all skill commands.')
+
+
+require_supported_python()
 
 WINDOWS = os.name == 'nt'
 DEFAULT_RUN_LEASE_SECONDS = 3600
 MIN_RUN_LEASE_SECONDS = 300
 RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {
     prefix + digit for prefix in ('COM', 'LPT') for digit in '123456789\u00b9\u00b2\u00b3'}
+
+
+def ensure_directory(path, *, parents=False):
+    """Accept EEXIST only when the requested directory actually exists."""
+    if path.is_dir():
+        return
+    try:
+        path.mkdir(parents=parents, exist_ok=True)
+    except FileExistsError:
+        if not path.is_dir():
+            raise
 
 
 def relative_parts(value):

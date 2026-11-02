@@ -8,6 +8,7 @@ import sys
 
 from checkpoint import (check, digest, identifier, read, safe, residual_gate, residual_index,
                         residual_kinds, residual_lock, resource_access)
+from platform_support import ensure_directory
 
 CATEGORIES = {'product_candidate', 'needs_decision', 'environment', 'script', 'condition_missing',
               'api_exclusive', 'deferred', 'unbound_observation', 'cleanup_unknown'}
@@ -108,7 +109,7 @@ def main(argv=None):
         project = Path(args.project).resolve()
         result = build(project, read(Path(args.input)))
         output = safe(project, args.output, cache=True)
-        output.parent.mkdir(parents=True, exist_ok=True)
+        ensure_directory(output.parent, parents=True)
         text = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
         if output.exists():
             check(output.read_text(encoding='utf-8') == text, 'output exists with different input; use a new output name')

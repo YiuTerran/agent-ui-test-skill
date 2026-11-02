@@ -85,6 +85,24 @@ class SchedulingTest(unittest.TestCase):
         self.assertEqual(result['requested'], result['effective'])
         self.assertEqual('default', result['configuration_sources']['browser_parallel_cap'])
 
+    def test_acquire_and_release_with_broker_eexist_on_existing_directories(self):
+        mkdir = Path.mkdir
+
+        def broker_mkdir(path, *args, **options):
+            if options.get('exist_ok') and path.is_dir():
+                raise FileExistsError()
+            return mkdir(path, *args, **options)
+
+        with patch.object(Path, 'mkdir', broker_mkdir):
+            lease = self.acquire()
+            self.assertTrue(self.acquire()['idempotent'])
+            blocked = self.acquire(run_id='other-run')
+            self.assertFalse(blocked['acquired'])
+            self.release(lease['lease'])
+            next_lease = self.acquire()
+            self.assertTrue(next_lease['acquired'])
+            self.release(next_lease['lease'])
+
     def test_mac_probe_only_counts_free_and_reclaimable_pages(self):
         output = ('Mach Virtual Memory Statistics: (page size of 16384 bytes)\n'
                   'Pages free: 100.\nPages active: 900000.\nPages inactive: 200.\n'

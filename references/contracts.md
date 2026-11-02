@@ -242,6 +242,8 @@ report返回summary、report_bundles、可选merged_report、report_consistency�
 | acquire | 原子重核预算/就绪；仅acquired=true可启动；false含配额/冲突原因，不先重复budget/ready |
 | release/reap | release用lease_id/release_token，teardown后释放；reap须同宿主owner_pid确认死亡或规范workflow任务终态，不按超时猜回收 |
 
+异常退出后使用既有`reap`核实回收条件，不手改quota账本。配额回收仅解除本地调度占用，不证明测试创建的业务资源已清理；项目fixture的锁、身份池和资源残留分别核验，清理证据继续走原有资源事件与派发门禁。
+
 config_path只选择调度配置，不改变工作流元数据位置。所有调用保持同一PROJECT，共享规范的`test/.cache/scheduling`配额账本与`test/.cache/resource-residuals.json`残留索引，不通过更换目录拆分安全状态。
 
 ```json

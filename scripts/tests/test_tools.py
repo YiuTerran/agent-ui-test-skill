@@ -144,6 +144,44 @@ class ToolsTest(TestCase):
         self.assertEqual([], self.state()['events'])
         self.assertEqual('observe', result['sources']['S1']['action'])
         self.assertFalse(result['run']['global_residuals_checked'])
+        self.assertTrue(result['runtime']['checks']['python']['valid'])
+        self.assertEqual('not_checked', result['runtime']['checks']['node']['status'])
+
+    def test_preflight_runtime_failure_never_creates_or_renews_run(self):
+        mkdir = Path.mkdir
+
+        def non_idempotent_mkdir(path, *args, **options):
+            if options.get('exist_ok') and path.is_dir():
+                raise FileExistsError()
+            return mkdir(path, *args, **options)
+
+        with self.ignored(), mock.patch.object(Path, 'mkdir', non_idempotent_mkdir):
+            result = self.cli('preflight', '--owner', self.owner, fail=True)
+        self.assertFalse(result['run_started'])
+        self.assertEqual('fs_mkdir_not_idempotent',
+                         result['runtime']['checks']['python']['error_type'])
+        self.assertFalse((self.project / 'test/.cache/runs').exists())
+        self.start()
+        state_before = self.state()
+        with self.ignored(), mock.patch.object(Path, 'mkdir', non_idempotent_mkdir):
+            self.cli('preflight', '--run', self.run, '--owner', self.owner, fail=True)
+        self.assertEqual(state_before, self.state())
+
+    def test_preflight_checks_requested_node_in_same_environment(self):
+        self.write('preflight.json', {'runtime': {'node': 'project-node'}})
+
+        def command_result(command, **kwargs):
+            if command[0] == 'git':
+                return type('GitResult', (), {
+                    'returncode': 0, 'stdout': 'test/.cache/\0' if 'check-ignore' in command else ''})()
+            self.assertEqual('project-node', command[0])
+            self.assertNotIn('env', kwargs)
+            return wf.subprocess.CompletedProcess(command, 0, '{"valid":true}', '')
+
+        with mock.patch.object(wf.subprocess, 'run', side_effect=command_result):
+            result = self.cli('preflight', '--owner', self.owner,
+                              '--input', str(self.project / 'preflight.json'))
+        self.assertTrue(result['runtime']['checks']['node']['valid'])
 
     def test_preflight_missing_inventory_is_unknown_not_complete_coverage(self):
         self.start()

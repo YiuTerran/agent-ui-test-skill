@@ -10,7 +10,7 @@ import re
 import sys
 import tempfile
 
-from platform_support import file_lock, relative_parts, sync_directory
+from platform_support import ensure_directory, file_lock, relative_parts, sync_directory
 
 RESIDUAL_INDEX = 'test/.cache/resource-residuals.json'
 RESOLVED = {'absence_verified', 'retained_verified'}
@@ -20,7 +20,7 @@ RESOURCE_STATES = {'intent', 'confirmed', 'ambiguous', 'cleanup_failed'} | RESOL
 @contextmanager
 def residual_lock(project):
     path = safe(project, RESIDUAL_INDEX, cache=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory(path.parent, parents=True)
     with path.with_suffix('.lock').open('a+b') as stream:
         with file_lock(stream.fileno()):
             yield
@@ -451,7 +451,7 @@ def dispatch(project, journal, command, request, workers=4):
         with residual_lock(project):
             return predispatch_gate(project, request)
     path = safe(project, journal, cache=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory(path.parent, parents=True)
     with path.with_suffix(path.suffix + '.lock').open('a+b') as lock:
         with file_lock(lock.fileno()), residual_lock(project):
             rows = replay(path)

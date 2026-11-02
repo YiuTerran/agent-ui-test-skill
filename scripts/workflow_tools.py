@@ -152,6 +152,14 @@ def preflight(wf, project, args):
     diagnostics = wf.doctor(project)
     if not diagnostics['valid']:
         return {'valid': False, 'diagnostics': diagnostics, 'run_started': False}
+    runtime_input = request.get('runtime', {})
+    wf.check(isinstance(runtime_input, dict) and set(runtime_input) <= {'directory', 'node'},
+             'runtime accepts only directory and node')
+    wf.check(all(isinstance(value, str) and value for value in runtime_input.values()),
+             'runtime directory and node must be nonempty strings')
+    runtime = sibling('runtime_probe').inspect(project, **runtime_input)
+    if not runtime['valid']:
+        return {'valid': False, 'diagnostics': diagnostics, 'runtime': runtime, 'run_started': False}
     with wf.project_lock(project):
         spec, cov = wf.assets(project)
         if args.run:
@@ -171,7 +179,7 @@ def preflight(wf, project, args):
                 diff = discovery_diff(wf, project, state, spec, cov, request)
             except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
                 # start may have inherited obligations; never silently roll it back.
-                return {'valid': False, 'run': view, 'diagnostics': diagnostics,
+                return {'valid': False, 'run': view, 'diagnostics': diagnostics, 'runtime': runtime,
                         'error': str(error), 'run_started': True,
                         'next_steps': ['repair_supplied_evidence_then_reuse_this_run']}
         if diff['status'] == 'checked':
@@ -198,7 +206,7 @@ def preflight(wf, project, args):
             state['discovery_inventory'] = inventory
             wf.atomic(wf.run_path(project, args.run) / 'state.json', state)
             view = wf.status(project, state, spec, cov, full=False, include_history=False)
-        return {'valid': True, 'run': view, 'diagnostics': diagnostics,
+        return {'valid': True, 'run': view, 'diagnostics': diagnostics, 'runtime': runtime,
                 'sources': sources, 'coverage_diff': diff,
                 'next_steps': view['next_steps'],
                 'note': 'Local preflight; source observations/discovery are caller evidence. '
@@ -310,7 +318,7 @@ def attempt_init(wf, project, args):
                     config_fingerprint=wf.fingerprint(spec), asset_fingerprint=wf.fingerprint(cov))
         wf.check(not directory.exists(), 'attempt directory already exists; use a new bundle ID or inspect existing evidence')
         # Publish a complete intent atomically; failures never reserve the bundle ID.
-        directory.parent.mkdir(parents=True, exist_ok=True)
+        wf.platform_support.ensure_directory(directory.parent, parents=True)
         staged = Path(tempfile.mkdtemp(prefix='.' + args.bundle + '-', dir=directory.parent))
         try:
             for name in ('results/output', 'report/playwright', 'blob'):

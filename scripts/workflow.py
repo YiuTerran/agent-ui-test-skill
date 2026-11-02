@@ -70,7 +70,7 @@ def load(path):
 
 
 def atomic(path, data, exclusive=False):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    platform_support.ensure_directory(path.parent, parents=True)
     check(not exclusive or not path.exists(), 'refusing to overwrite existing file: ' + str(path))
     fd, temp = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
     try:
@@ -118,7 +118,7 @@ def no_secrets(value):
 @contextmanager
 def project_lock(project):
     directory = project / 'test/.cache'
-    directory.mkdir(parents=True, exist_ok=True)
+    platform_support.ensure_directory(directory, parents=True)
     with (directory / 'workflow.lock').open('a+b') as stream:
         with platform_support.file_lock(stream.fileno()):
             yield
@@ -1450,7 +1450,7 @@ def start(project, args, spec, cov, full=True):
     scopes = sorted(set(args.scopes.split(','))) if args.scopes else sorted(spec.get('scope', {}).get('fixed', []))
     check(set(scopes) <= set(spec.get('scope', {}).get('fixed', [])), 'selected scope is outside fixed project scope')
     runs = project / 'test/.cache/runs'
-    runs.mkdir(parents=True, exist_ok=True)
+    platform_support.ensure_directory(runs, parents=True)
     candidates = []
     prior_finished, overlapping = [], []
     superseded = {}
@@ -1577,8 +1577,8 @@ def start(project, args, spec, cov, full=True):
                         state[field][local_key] = copied
                 state['invalidated'] = sorted(set(state['invalidated']) | invalid)
                 state['delegation_blocks'].extend(copy.deepcopy(delegation))
-        (path.parent / 'evidence').mkdir(parents=True, exist_ok=True)
-        (path.parent / 'receipts').mkdir(parents=True, exist_ok=True)
+        platform_support.ensure_directory(path.parent / 'evidence', parents=True)
+        platform_support.ensure_directory(path.parent / 'receipts', parents=True)
     state['claim'] = {'owner': args.owner, 'renewed_at': now(), 'lease_seconds': LEASE_SECONDS}
     state['config_fingerprint'] = fingerprint(spec)
     for prior_path, prior in superseded.items():
