@@ -261,6 +261,21 @@ def attempt_init(wf, project, args):
         wf.check(args.bundle not in state.get('report_bundles', {})
                  and args.bundle not in state.get('interrupted_attempts', {}), 'bundle ID is already registered')
         plan = {key: request[key] for key in ('command', 'scope', 'setup_projects', 'cwd', 'environment')}
+        if 'extra_reporters' in request:
+            string_array(wf, request['extra_reporters'], 'extra_reporters')
+            reporters = []
+            shipped = Path(__file__).with_name('checkpoint_playwright_reporter.mjs').resolve()
+            for value in request['extra_reporters']:
+                wf.check(',' not in value, 'extra reporter paths must not contain commas')
+                if Path(value).is_absolute():
+                    path = Path(value).resolve()
+                    wf.check(path == shipped, 'absolute extra reporter must be the shipped checkpoint sidecar')
+                else:
+                    path = wf.safe_path(project, value)
+                wf.check(path.is_file() and ',' not in str(path), 'extra reporter must be an existing file without commas')
+                wf.check(str(path) not in reporters, 'extra_reporters must resolve to unique files')
+                reporters.append(str(path))
+            plan['extra_reporters'] = reporters
         mode = request.get('regression_mode', 'affected')
         wf.check(mode in {'affected', 'full'}, 'regression_mode must be affected or full')
         plan['regression_mode'] = mode
@@ -312,7 +327,9 @@ def attempt_init(wf, project, args):
                                 'PLAYWRIGHT_HTML_OUTPUT_DIR': str(directory / 'report/playwright'),
                                 'PLAYWRIGHT_BLOB_OUTPUT_DIR': str(directory / 'blob'),
                                 'PLAYWRIGHT_HTML_OPEN': 'never'},
-                'reporter_arguments': ['--reporter=list,json,html,blob', '--output', str(directory / 'results/output')],
+                'reporter_arguments': ['--reporter=' + ','.join(
+                    ['list', 'json', 'html', 'blob', *plan.get('extra_reporters', [])]),
+                    '--output', str(directory / 'results/output')],
                 'receipt_path': relative + '/command.json',
                 'receipt_required_fields': ['command', 'cwd', 'environment', 'scope', 'setup_projects',
                                             'started_at', 'ended_at', 'exit_code'],
@@ -325,10 +342,8 @@ def checked_attempt(wf, project, args, state, spec, cov):
     wf.check(args.bundle not in state.get('interrupted_attempts', {}), 'bundle ID registered as interrupted')
     plan = wf.load(directory / 'plan.json')
     wf.check(plan['run_id'] == state['run_id'] and plan['bundle_id'] == args.bundle, 'attempt plan identity mismatch')
-    wf.check(plan['freshness_marker'] == state['freshness_marker']
-             and plan['config_fingerprint'] == wf.fingerprint(spec)
-             and plan['asset_fingerprint'] == wf.fingerprint(cov)
-             and not state.get('recovery_required'), 'attempt inputs changed; retain evidence and review recovery')
+    plan_sha256 = wf.hashlib.sha256((directory / 'plan.json').read_bytes()).hexdigest()
+    wf.attempt_input_review(state, spec, cov, plan, relative + '/plan.json', plan_sha256)
     receipt_path = wf.safe_path(project, args.input) if args.input else directory / 'command.json'
     wf.check(receipt_path.is_relative_to(directory), 'command receipt must be inside the attempt directory')
     receipt = wf.load(receipt_path)
@@ -345,7 +360,7 @@ def checked_attempt(wf, project, args, state, spec, cov):
                                            'started_at', 'ended_at', 'exit_code')}
     bundle.update(bundle_id=args.bundle, run_id=state['run_id'],
                   attempt_plan=relative + '/plan.json',
-                  attempt_plan_sha256=wf.hashlib.sha256((directory / 'plan.json').read_bytes()).hexdigest(),
+                  attempt_plan_sha256=plan_sha256,
                   execution_result=relative + '/results/result.json',
                   html_origin='same_execution', html_report=relative + '/report/playwright/index.html',
                   blob_reports=sorted(p.relative_to(project).as_posix() for p in (directory / 'blob').glob('*.zip')))

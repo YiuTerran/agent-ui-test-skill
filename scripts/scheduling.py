@@ -108,14 +108,19 @@ def timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
-def configuration(project, overrides):
-    spec_path = project / 'test/spec.md'
+def configuration(project, overrides, config_path='test/spec.md'):
     spec = {}
-    if spec_path.exists():
-        blocks = re.findall(r'```json workflow-config\s*\n(.*?)\n```', spec_path.read_text(encoding='utf-8'), re.S)
-        check(len(blocks) == 1, 'spec.md requires exactly one json workflow-config block')
-        spec = json.loads(blocks[0])
-        check(isinstance(spec, dict), 'workflow-config must be an object')
+    if config_path is not None:
+        platform_support.relative_parts(config_path)
+        spec_path = project / config_path
+        check(config_path == 'test/spec.md' or spec_path.is_file(), 'scheduling config missing')
+        if spec_path.exists():
+            spec_path = spec_path.resolve()
+            check(spec_path.is_relative_to(project), 'scheduling config outside project')
+            blocks = re.findall(r'```json workflow-config\s*\n(.*?)\n```', spec_path.read_text(encoding='utf-8'), re.S)
+            check(len(blocks) == 1, 'scheduling config requires exactly one json workflow-config block')
+            spec = json.loads(blocks[0])
+            check(isinstance(spec, dict), 'workflow-config must be an object')
     configured = spec.get('concurrency', {})
     check(isinstance(configured, dict) and isinstance(overrides, dict), 'concurrency must be an object')
     check(not (set(overrides) - set(CONFIG_DEFAULTS)), 'unknown concurrency override')
@@ -254,7 +259,8 @@ def quota_view(ledger):
 
 
 def budget(project, data, ledger, independent=None):
-    config, config_sources = configuration(project, data.get('concurrency', {}))
+    config, config_sources = configuration(project, data.get('concurrency', {}),
+                                           data.get('config_path', 'test/spec.md'))
     facts, fact_sources = resource_facts(data)
     active = counts(ledger['leases'].values())
     requested_agents = config['auto_parallel_cap'] if config['max_parallel_agents'] == 'auto' else config['max_parallel_agents']

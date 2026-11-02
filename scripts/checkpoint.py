@@ -255,7 +255,8 @@ def manifest(project, request):
         seen.add(cid)
         check(case['reviewed'] is True, 'all selected cases must be reviewed before checkpoint initialization')
         check(set(case['target']) == {'file', 'project', 'title_path'}, 'exact file/project/title_path required')
-        check(all(isinstance(case['target'][k], str) and case['target'][k] for k in ['file', 'project']), 'empty test target')
+        check(isinstance(case['target']['file'], str) and case['target']['file']
+              and isinstance(case['target']['project'], str), 'invalid test file/project target')
         title_path = case['target']['title_path']
         check(isinstance(title_path, list) and title_path and all(isinstance(v, str) for v in title_path)
               and title_path[-1], 'complete reporter titlePath required')

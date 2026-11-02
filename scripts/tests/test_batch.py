@@ -1,5 +1,6 @@
 """Batch paths exercise real recorder gates with synthetic, offline artifacts."""
 import json
+from datetime import timedelta
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -160,18 +161,28 @@ class BatchTest(unittest.TestCase):
         self.assertEqual('in_progress', self.state()['acceptance'])
 
     def test_offline_merge_invoked_once_with_all_blobs_and_real_receipt(self):
+        self.merge_and_finalize(['pnpm', 'exec', 'playwright'])
+
+    def test_node_playwright_merge_can_finalize_and_replay(self):
+        self.merge_and_finalize(['node', 'node_modules/playwright/cli.js'])
+        self.assertTrue(self.finish()['replayed'])
+
+    def test_windows_package_launcher_merge_receipt_can_finalize(self):
+        self.merge_and_finalize(['C:\\tools\\pnpm.cmd', 'exec', 'playwright'])
+
+    def merge_and_finalize(self, command):
         at = self.prepared(retry=True)
         self.collect(at)
         request = self.final_input()
         raw = wf.load(self.project / self.state()['report_bundles']['E1']['execution_result'])
         request.pop('events')
-        request['merge'] = {'command': ['pnpm', 'exec', 'playwright']}
+        request['merge'] = {'command': command}
         self.write('finalize.json', request)
         calls = []
 
         def merge(argv, **kw):
             calls.append(argv)
-            self.assertEqual(['pnpm', 'exec', 'playwright', 'merge-reports', '--reporter=html'], argv[:5])
+            self.assertEqual(command + ['merge-reports', '--reporter=html'], argv[:-1])
             self.assertFalse(kw['shell'])
             self.assertEqual(1, len(list(Path(argv[-1]).glob('*.zip'))))
             self.assertEqual('0', kw['env']['COREPACK_ENABLE_NETWORK'])
@@ -190,18 +201,55 @@ class BatchTest(unittest.TestCase):
         batch = tools_module.module_from_spec(spec)
         spec.loader.exec_module(batch)
         for command in (['pnpm', 'exec', 'playwright'], ['npx', 'playwright'],
+                        ['pnpm.cmd', 'exec', 'playwright'], ['C:\\tools\\npx.cmd', 'playwright'],
+                        ['corepack.exe', 'pnpm', 'exec', 'playwright'],
                         ['corepack', 'pnpm@9.0.0', 'exec', 'playwright'],
                         ['node', 'node_modules/@playwright/test/cli.js'],
+                        ['node', 'node_modules/playwright/cli.js'],
+                        ['node.exe', 'C:\\repo\\node_modules\\playwright-core\\cli.js'],
                         ['node_modules/.bin/playwright'], ['C:\\repo\\node_modules\\.bin\\playwright.cmd']):
             with self.subTest(command=command):
                 batch.check_merge_launcher(wf, command)
+                wf.report_artifacts.verify_merge_command(
+                    command + ['merge-reports', '--reporter=html', 'synthetic-input'])
         for command in (['python3', 'x.py', 'playwright'], ['bash', '-c', 'playwright'],
                         ['node', '--require', 'evil.js', 'node_modules/@playwright/test/cli.js'],
+                        ['pnpm', '--require=evil.js', 'exec', 'playwright'],
+                        ['node', 'node_modules/@playwright/unrelated/cli.js'],
                         ['node', 'scripts/cli.js'], ['node_modules/.bin/playwright', 'extra'],
                         ['npx', 'playwright', 'test'], ['pnpm', 'dlx', 'playwright']):
             with self.subTest(command=command):
                 with self.assertRaises(ValueError):
                     batch.check_merge_launcher(wf, command)
+
+    def test_reclaimed_owner_can_finish_checkpoint_without_replaying_applied_events(self):
+        at = self.prepared(full=False)
+        self.collect(at)
+        request = self.final_input()
+        self.assertEqual('report_checks', self.finish(fail=True)['stage'])
+        prior_owner = self.owner
+        prior = self.state()['finalization']
+        resumed_at = wf.dt(self.state()['claim']['renewed_at']) + timedelta(hours=2)
+        self.owner = 'successor-owner'
+        with mock.patch.object(wf, 'now', return_value=resumed_at.isoformat()):
+            resumed = self.cli('start', '--resume', self.run, '--owner', self.owner,
+                               '--scopes', 'a', '--reclaim', '--reason',
+                               'Recover expired regression finalization')
+            self.marker = resumed['freshness_marker']
+            self.record({'type': 'recovery_review', 'environment_checked': True, 'artifacts_checked': True})
+            self.check_sources('S1')
+            request['require_full'] = False
+            self.write('finalize.json', request)
+            result = self.finish()
+            self.assertTrue(result['released'])
+            state = self.state()
+            self.assertEqual(1, sum(event['type'] == 'merged_report' for event in state['events']))
+            finalization = state['finalization']
+            self.assertEqual(self.owner, finalization['owner'])
+            self.assertEqual(prior['applied_event_sha256'], finalization['applied_event_sha256'])
+            self.assertEqual(prior_owner, finalization['owner_history'][0]['from_owner'])
+            self.assertEqual(self.owner, finalization['owner_history'][0]['to_owner'])
+            self.assertTrue(self.finish()['replayed'])
 
     def test_merge_nonzero_preserves_active_state(self):
         at = self.prepared()

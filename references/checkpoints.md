@@ -1,10 +1,12 @@
 # 断点调度与有限工作包
 
-用于长回归、中断续跑和失败确认。程序负责日志、输入指纹、领取、修复历史和分组；Agent只诊断未知根因、审核依赖闭包及编写修复。以下入口独立于`workflow.py`，不启动产品测试、不修改验收状态、不授予权限、不替代浏览器配额
+用于需要逐case观察复用的长回归、中断续跑和失败确认；项目已有恢复能力时优先复用。程序负责日志、输入指纹、领取、修复历史和分组；Agent只诊断未知根因、审核依赖闭包及编写修复。以下入口独立于`workflow.py`，不启动产品测试、不修改验收状态、不授予权限、不替代浏览器配额
 
 ## 一次接入项目runner
 
-项目runner在真实发现后生成精确清单，接入一次即可复用。默认保留原生JSON/blob/HTML reporter，并追加`scripts/checkpoint_playwright_reporter.mjs`作为观察sidecar。自动retry和repeatEach关闭；每次确认或修复复测领取独立attempt
+先核实suite是否适用：该sidecar每attempt每case只接受一个结果，要求retry=0且repeatEach=1。项目原有重试或重复执行属于本轮目标时，保留原设置，使用原生JSON/blob/HTML及正常attempt-collect，不强行接入sidecar或宣称逐case复用。配额、冲突组及[残留派发门禁](#跨run残留门禁)照常执行。只有项目已采用该单次模型或用户明确同意改变执行语义时才接入，不为长回归自动关闭重试/重复执行。
+
+适用的项目runner在真实发现后生成精确清单，接入一次即可复用。保留原生JSON/blob/HTML reporter，并追加`scripts/checkpoint_playwright_reporter.mjs`作为观察sidecar；使用attempt-init的reporter参数时，在输入`extra_reporters`传该随附脚本的绝对路径，避免CLI覆盖配置后漏掉sidecar，详见[Attempt准备](local-tools.md#attempt准备与事件生成)。每次确认或修复复测领取独立attempt。
 
 ```json
 {
@@ -25,6 +27,7 @@
 ```
 
 - `target.title_path`是该项目实际Playwright `TestCase.titlePath()`的完整数组，包括describe层级；示例不是所有项目的固定结构。发现转换器必须与实际版本对齐，不只取叶子标题。Reporter在onBegin核对实际suite、歧义和repeatEach
+- `target.project`取真实project名称，未命名时为`""`，不补造chromium等名称；文件、project及完整title_path共同决定身份。
 - `inputs`包含测试及审核过的传递依赖、fixture、配置和影响预期的来源缓存。漏列依赖不能证明复用有效；`reviewed:true`仅声明闭包经过审核，不替代workflow用例审批。共享输入每次plan只哈希一次
 - `environment_id`是部署/配置基线标识，不包含凭据。相关远端环境变化时创建新checkpoint；清单初始化后不可变。checkpoint不自动侦测远端变更
 - `dependencies`用于登录、Bootstrap、helper等依赖熔断；`conflicts`用于租户共享配置、账号或数据冲突。独立组可并发，共享组串行，配额仍由`scheduling.py`管理
@@ -54,7 +57,7 @@ Reporter环境变量由runner传入子进程，不打印：
 | `E2E_CHECKPOINT_STREAM` | 项目test/.cache下全新JSONL绝对路径 |
 | `E2E_CHECKPOINT_SETUP_PROJECTS` | 可选，明确排除的认证Setup项目名，逗号分隔 |
 
-每个onTestEnd写入并fsync，不保存原始错误或请求。sidecar要求实际`result.retry=0`；非0视为runner配置错误，写入mapping_error并阻止整批摄取，不将重试通过覆盖旧失败。retry/repeatEach由项目runner执行前关闭，checkpoint init只校验manifest，不修改Playwright配置。完整映射冲突和未知目标同样使sidecar失败；原生reporter仍保留实际结果。一个attempt每case只允许一个结果
+每个onTestEnd写入并fsync，不保存原始错误或请求。sidecar要求实际`result.retry=0`；非0写入mapping_error并阻止整批摄取，不将重试通过覆盖旧失败。checkpoint init只校验manifest，不修改Playwright配置；适用性必须在执行前确定。误接入时保留真实原生产物，修复集成并复用原生采集，不为获得sidecar结果而重跑业务。完整映射冲突和未知目标同样使sidecar失败；一个attempt每case只允许一个结果。
 
 ## 中断恢复与依赖熔断
 

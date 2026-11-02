@@ -194,7 +194,11 @@ def check_attempt_command(plan, command, directory):
     planned = plan['command']
     check(command[:len(planned)] == planned, 'actual command does not match planned command prefix')
     suffix, seen = command[len(planned):], set()
-    permitted = {'--reporter=list,json,html,blob': [],
+    extras = plan.get('extra_reporters', [])
+    check(isinstance(extras, list) and all(isinstance(value, str) and value and ',' not in value
+                                         for value in extras), 'invalid planned extra_reporters')
+    reporter = '--reporter=' + ','.join(['list', 'json', 'html', 'blob', *extras])
+    permitted = {reporter: [],
                  '--output': [str(directory / 'results/output')]}
     while suffix:
         option = suffix[0]
@@ -551,13 +555,48 @@ def regression_completeness(bundles, required_scopes=None, *, required=False, pr
                     'skips, failures and caller discovery provenance remain separate.'}
 
 
+PLAYWRIGHT_BINS = {'playwright', 'playwright.cmd', 'playwright.ps1'}
+PACKAGE_RUNNERS = {'npx', 'pnpm', 'yarn', 'bunx', 'corepack'}
+FORBIDDEN_MERGE_ARGS = {'test', 'install', 'add', 'dlx', 'create', '-c', '--eval', '-e', '--require', '-r',
+                        '--import', '--loader', '--experimental-loader', '-p', '--print'}
+
+
+def executable_name(value):
+    return Path(value.replace('\\', '/')).name.lower()
+
+
+def playwright_cli_script(value):
+    normalized = value.replace('\\', '/').lower()
+    return any(normalized.endswith('/node_modules/' + suffix) or normalized == 'node_modules/' + suffix
+               for suffix in ('@playwright/test/cli.js', 'playwright/cli.js', 'playwright-core/cli.js'))
+
+
+def check_merge_launcher(command):
+    check(isinstance(command, list) and command
+          and all(isinstance(value, str) and value for value in command), 'merge.command requires argv')
+    check(not any(value.split('=', 1)[0] in FORBIDDEN_MERGE_ARGS for value in command),
+          'merge.command must be a local offline launcher without test/install/eval/preload arguments')
+    first = executable_name(command[0])
+    if first in PLAYWRIGHT_BINS:
+        check(len(command) == 1, 'a direct Playwright binary takes no launcher arguments')
+    elif first in {'node', 'node.exe'}:
+        check(len(command) == 2 and playwright_cli_script(command[-1]),
+              'node must run only the installed Playwright CLI script')
+    else:
+        runner = first[:-4] if first.endswith(('.cmd', '.exe')) else first
+        check(runner.split('@')[0] in PACKAGE_RUNNERS,
+              'merge.command must start with npx/pnpm/yarn/bunx/corepack, node, or playwright')
+        check(executable_name(command[-1]) in PLAYWRIGHT_BINS,
+              'package runner must end with the playwright binary name')
+
+
 def verify_merge_command(command):
     check(isinstance(command, list) and all(isinstance(arg, str) and arg for arg in command),
           'merge command must be the actual argv array')
     normalized = [arg.replace('\\', '/').lower() for arg in command]
     check('merge-reports' in normalized, 'merge command must run Playwright merge-reports')
-    playwright_cli = any(Path(arg).name in {'playwright', 'playwright.cmd', 'playwright.ps1'}
-                         or arg.endswith('/@playwright/test/cli.js') for arg in normalized)
+    playwright_cli = any(executable_name(arg) in PLAYWRIGHT_BINS or playwright_cli_script(arg)
+                         for arg in command)
     check(playwright_cli, 'merge command must identify the Playwright CLI')
     check('--reporter=html' in normalized or any(
         arg == '--reporter' and index + 1 < len(normalized) and normalized[index + 1] == 'html'

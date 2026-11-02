@@ -170,6 +170,29 @@ class SchedulingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.budget()
 
+    def test_direct_runner_can_leave_unrelated_spec_untouched_and_share_quota(self):
+        document = '# Existing project specification without workflow configuration\n'
+        self.write('test/spec.md', document)
+        first = self.acquire(config_path=None, concurrency={'browser_parallel_cap': 1})
+        self.assertTrue(first['acquired'])
+        second = self.acquire(config_path=None, concurrency={'browser_parallel_cap': 1},
+                              owner='other-worker', run_id='other-run')
+        self.assertFalse(second['acquired'])
+        self.assertEqual(document, (self.project / 'test/spec.md').read_text(encoding='utf-8'))
+        self.release(first['lease'])
+        self.assertTrue(self.acquire(config_path=None, concurrency={'browser_parallel_cap': 1})['acquired'])
+
+    def test_explicit_scheduler_config_preserves_workspace_limits(self):
+        self.write('quality/e2e/settings.md', '```json workflow-config\n' + json.dumps({
+            'concurrency': {'playwright_workers': 1, 'browser_parallel_cap': 2}}) + '\n```\n')
+        result = self.budget(config_path='quality/e2e/settings.md')
+        self.assertEqual(2, result['effective']['browsers'])
+        self.assertEqual(1, result['effective']['playwright_workers'])
+        self.assertEqual('spec', result['configuration_sources']['browser_parallel_cap'])
+        for config_path in ('../outside.md', '/outside.md', 'missing.md', False):
+            with self.subTest(config_path=config_path), self.assertRaises(ValueError):
+                self.budget(config_path=config_path)
+
     def test_legacy_task_defaults_without_new_fields(self):
         tasks = {'a': {'phase': 'code', 'status': 'pending', 'source_id': 's1'},
                  'b': {'phase': 'code', 'status': 'pending', 'source_id': 's1'},

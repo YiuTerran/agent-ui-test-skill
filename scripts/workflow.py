@@ -341,6 +341,65 @@ def scoped_cases(state, cov):
             if case.get('scope') in state['scopes'] and case.get('implementation') != 'retired'}
 
 
+def attempt_input_review(state, spec, cov, plan, plan_path, plan_sha256):
+    check(plan['config_fingerprint'] == fingerprint(spec)
+          and plan['asset_fingerprint'] == fingerprint(cov)
+          and not state.get('recovery_required'),
+          'attempt inputs changed; retain evidence and review recovery')
+    if plan['freshness_marker'] == state['freshness_marker']:
+        return None
+    review = state.get('attempt_recovery_reviews', {}).get(plan['bundle_id'], {})
+    check(review.get('attempt_plan') == plan_path
+          and review.get('attempt_plan_sha256') == plan_sha256
+          and review.get('freshness_marker') == state['freshness_marker']
+          and review.get('original_freshness_marker') == plan['freshness_marker'],
+          'pre-resume attempt requires an explicit recovery_review.attempt_plans binding')
+    return review
+
+
+def review_attempt_plans(project, state, spec, cov, event):
+    requests = event.get('attempt_plans', [])
+    check(isinstance(requests, list), 'attempt_plans must be an array')
+    reviews = {}
+    for request in requests:
+        check(isinstance(request, dict)
+              and set(request) == {'attempt_plan', 'attempt_plan_sha256'},
+              'attempt_plans requires attempt_plan and attempt_plan_sha256')
+        path = safe_path(project, request['attempt_plan'])
+        plan = load(path)
+        bid = plan['bundle_id']
+        check(isinstance(bid, str) and re.fullmatch(r'[A-Za-z0-9_-]+', bid),
+              'invalid recovery bundle ID')
+        expected = f"test/.cache/runs/{state['run_id']}/attempts/{bid}/plan.json"
+        check(request['attempt_plan'] == expected and plan['run_id'] == state['run_id'],
+              'recovery plan must belong to this run and attempt')
+        check(bid not in reviews, 'duplicate recovery attempt plan')
+        checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+        check(request['attempt_plan_sha256'] == checksum, 'recovery attempt plan digest mismatch')
+        check(plan['config_fingerprint'] == fingerprint(spec)
+              and plan['asset_fingerprint'] == fingerprint(cov),
+              'recovery attempt configuration or coverage differs from reviewed inputs')
+        check(isinstance(plan.get('scope'), list) and set(plan['scope']) <= set(state['scopes']),
+              'recovery attempt scope outside run')
+        check(state.get('resume_history') and plan['freshness_marker'] != state['freshness_marker']
+              and dt(plan['planned_at']) <= dt(state['resume_history'][-1]['at']),
+              'recovery binding requires a pre-resume attempt plan')
+        reviews[bid] = dict(request, freshness_marker=state['freshness_marker'],
+                            original_freshness_marker=plan['freshness_marker'],
+                            reviewed_at=event['at'], reviewed_by=state['claim']['owner'],
+                            review_seq=event['seq'])
+    return reviews
+
+
+def regression_completeness(project, state):
+    bundles = state.get('report_bundles', {})
+    result = report_artifacts.regression_completeness(
+        bundles, state['scopes'], required=state.get('native_merge_required', False), project=project)
+    result['recovered_bundle_ids'] = sorted(bid for bid, bundle in bundles.items()
+                                           if bundle.get('recovery_review'))
+    return result
+
+
 def needed_sources(state, spec):
     return [s['id'] for s in spec.get('source', []) if set(s.get('scopes', [s.get('scope')])) & set(state['scopes'])]
 
@@ -781,6 +840,9 @@ def record_event(project, state, spec, cov, event, context=None):
         state['source_checks'][sid] = event
     elif kind == 'recovery_review':
         check(event.get('environment_checked') is True and event.get('artifacts_checked') is True, 'recovery requires environment and artifact review')
+        reviews = review_attempt_plans(project, state, spec, cov, event)
+        if reviews:
+            state.setdefault('attempt_recovery_reviews', {}).update(reviews)
         state['recovery_required'] = False
         state['asset_fingerprint'] = fingerprint(cov)
         state['invalidated'] = sorted(set(state['invalidated']) | set(event.get('invalidate_case_ids', [])))
@@ -1047,11 +1109,11 @@ def record_event(project, state, spec, cov, event, context=None):
         checked = report_artifacts.inspect_bundle(
             project, state['run_id'], bundle, require_plan=state.get('native_merge_required', False))
         if checked.get('regression_check'):
-            inputs = checked['regression_check']
-            check(inputs['freshness_marker'] == state['freshness_marker']
-                  and inputs['config_fingerprint'] == fingerprint(spec)
-                  and inputs['asset_fingerprint'] == fingerprint(cov)
-                  and not state.get('recovery_required'), 'attempt inputs differ from the current reviewed run')
+            plan = load(safe_path(project, checked['attempt_plan']))
+            review = attempt_input_review(state, spec, cov, plan, checked['attempt_plan'],
+                                          checked['attempt_plan_sha256'])
+            if review:
+                checked['recovery_review'] = copy.deepcopy(review)
         state.setdefault('report_bundles', {})[bid] = checked
     elif kind == 'interrupted_attempt':
         attempt = event.get('attempt', {})
@@ -1099,8 +1161,7 @@ def record_event(project, state, spec, cov, event, context=None):
             check(not leased, 'leased pool accounts must be returned first: ' + ','.join(leased))
         if event['status'] == 'fully_accepted':
             native = state.get('native_merge_required', False)
-            regression = report_artifacts.regression_completeness(
-                state.get('report_bundles', {}), state['scopes'], required=native, project=project)
+            regression = regression_completeness(project, state)
             check(regression['status'] == 'complete' if native else regression['status'] != 'incomplete',
                   'full acceptance requires complete final-regression targets, current code and all planned shards: '
                   + json.dumps(regression, ensure_ascii=False))
@@ -1335,9 +1396,7 @@ def summary(project, state, spec, cov, recycled_paths=None):
                              'merged_html': (state['merged_report']['html_report'] if state.get('merged_report') and
                                              state['merged_report']['html_report'] not in recycled_paths else None)},
             'report_consistency': report_consistency(project, state, recycled_paths),
-            'regression_completeness': report_artifacts.regression_completeness(
-                state.get('report_bundles', {}), state['scopes'],
-                required=state.get('native_merge_required', False), project=project),
+            'regression_completeness': regression_completeness(project, state),
             'performance': {'source_cache_hits': sum(v.get('cache_hit') is True for v in state['source_checks'].values()),
                             'source_observations': len(state['source_checks']),
                             'regression_preflight': state.get('regression_preflight')},
@@ -1644,6 +1703,16 @@ def doctor(project):
     except (OSError, subprocess.TimeoutExpired):
         items.append({'check': 'cache_gitignore', 'status': 'error',
                       'action': 'verify Git is available and /test/.cache/ is ignored'})
+    try:
+        tracked = subprocess.run(['git', 'ls-files', '-z', '--', 'test/.cache'],
+                                 text=True, capture_output=True, cwd=project, timeout=5)
+        untracked = tracked.returncode == 0 and not tracked.stdout
+        items.append({'check': 'cache_untracked', 'status': 'ok' if untracked else 'error',
+                      'action': None if untracked else
+                      'verify Git index and remove cache files from tracking before saving credentials/evidence'})
+    except (OSError, subprocess.TimeoutExpired):
+        items.append({'check': 'cache_untracked', 'status': 'error',
+                      'action': 'verify Git is available and cache files are absent from the index'})
     return {'valid': all(item['status'] == 'ok' for item in items), 'checks': items,
             'note': 'Local diagnostics only; no source freshness, test discovery or business execution is proved.'}
 

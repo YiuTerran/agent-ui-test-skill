@@ -56,6 +56,22 @@ class CheckpointTest(unittest.TestCase):
         self.assertEqual(result['ready'], ['B'])
         self.assertEqual(result['formal_regression_completeness'], 'not_evaluated')
 
+    def test_unnamed_project_can_resume_and_reuse_exact_observations(self):
+        self.journal = 'test/.cache/unnamed-project.jsonl'
+        self.spec['cases'][0]['target']['project'] = ''
+        self.spec['cases'][0]['target']['title_path'] = ['', 'test/a.ts', 'A']
+        self.call('init', self.spec)
+        self.claim()
+        stream = 'test/.cache/unnamed-project-stream.jsonl'
+        self.root.joinpath(stream).write_text(json.dumps({
+            'type': 'case_end', 'event_id': 'unnamed-end', 'attempt_id': 'run1',
+            'case_id': 'A', 'status': 'passed'}) + '\n', encoding='utf-8')
+        self.call('ingest', {'attempt_id': 'run1', 'stream': stream})
+        self.close()
+        result = self.call('plan')
+        self.assertEqual(['A'], result['reused_observations'])
+        self.assertEqual(['B'], result['ready'])
+
     def test_restart_preserves_inflight_and_conflicts_without_automatic_replay(self):
         self.claim()
         result = cp.dispatch(self.root, self.journal, 'plan', {})

@@ -4,7 +4,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
-from unittest import TestCase, mock
+import shutil
+from unittest import TestCase, mock, skipUnless
 import zipfile
 
 import test_workflow as base
@@ -33,8 +34,11 @@ class ToolsTest(TestCase):
                      'tests': [{'projectName': 'chromium'}]} for cid in ('C1', 'C2')]}]}
 
     def ignored(self):
+        def git_result(command, **kwargs):
+            return type('GitResult', (), {
+                'returncode': 0, 'stdout': 'test/.cache/\0' if 'check-ignore' in command else ''})()
         return mock.patch.object(wf.subprocess, 'run',
-                                 return_value=type('GitResult', (), {'returncode': 0, 'stdout': 'test/.cache/\0'})())
+                                 side_effect=git_result)
 
     def snapshot(self):
         return {p.relative_to(self.project).as_posix(): p.read_bytes()
@@ -147,6 +151,51 @@ class ToolsTest(TestCase):
             result = self.cli('preflight', '--run', self.run, '--owner', self.owner)
         self.assertEqual('unknown', result['coverage_diff']['status'])
         self.assertEqual({}, self.state()['source_checks'])
+
+    @skipUnless(shutil.which('git'), 'Git is required for cache index diagnostics')
+    def test_preflight_rejects_tracked_cache_even_when_ignore_rule_matches(self):
+        for command in (['git', 'init', '--quiet'],
+                        ['git', 'add', '--force', 'test/.cache/private.json']):
+            if 'add' in command:
+                self.write('.gitignore', '/test/.cache/\n')
+                self.write('test/.cache/private.json', '{"fixture": "synthetic-only"}')
+            wf.subprocess.run(command, cwd=self.project, check=True, capture_output=True, timeout=5)
+        result = self.cli('preflight', '--owner', self.owner, fail=True)
+        checks = {item['check']: item for item in result['diagnostics']['checks']}
+        self.assertEqual('ok', checks['cache_gitignore']['status'])
+        self.assertEqual('error', checks['cache_untracked']['status'])
+        self.assertFalse(result['run_started'])
+        self.assertFalse((self.project / 'test/.cache/runs').exists())
+        self.assertNotIn('private.json', json.dumps(result))
+
+    @skipUnless(shutil.which('git'), 'Git is required for cache index diagnostics')
+    def test_doctor_resolves_ignore_and_index_relative_to_monorepo_workspace(self):
+        wf.subprocess.run(['git', 'init', '--quiet'], cwd=self.project,
+                          check=True, capture_output=True, timeout=5)
+        workspace = self.project / 'apps/web'
+        shutil.copytree(self.project / 'test', workspace / 'test')
+        self.write('.gitignore', '/apps/web/test/.cache/\n')
+        self.write('apps/web/test/.cache/private.json', '{}')
+        self.assertTrue(wf.doctor(workspace)['valid'])
+        wf.subprocess.run(['git', 'add', '--force', 'apps/web/test/.cache/private.json'],
+                          cwd=self.project, check=True, capture_output=True, timeout=5)
+        result = wf.doctor(workspace)
+        self.assertFalse(result['valid'])
+        checks = {item['check']: item['status'] for item in result['checks']}
+        self.assertEqual('ok', checks['cache_gitignore'])
+        self.assertEqual('error', checks['cache_untracked'])
+
+    def test_doctor_index_failure_keeps_preflight_closed(self):
+        def git_result(command, **kwargs):
+            if 'ls-files' in command:
+                raise wf.subprocess.TimeoutExpired(command, 5)
+            return type('GitResult', (), {'returncode': 0, 'stdout': 'test/.cache/\0'})()
+        with mock.patch.object(wf.subprocess, 'run', side_effect=git_result):
+            result = self.cli('preflight', '--owner', self.owner, fail=True)
+        self.assertFalse(result['run_started'])
+        checks = {item['check']: item['status'] for item in result['diagnostics']['checks']}
+        self.assertEqual('ok', checks['cache_gitignore'])
+        self.assertEqual('error', checks['cache_untracked'])
 
     def test_preflight_returns_created_run_when_supplied_evidence_is_invalid(self):
         self.write('preflight.json', {'discovery': {'path': 'missing.json', 'complete': True, 'setup_projects': []}})

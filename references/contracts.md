@@ -11,7 +11,7 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 | 命令/参数 | 作用与门禁 |
 | --- | --- |
 | `init` | 原子补齐`test/spec.md`、`test/plans/coverage.json`，已有文件字节不变；返回created/preserved、缺项及发现的配置/脚本名称，不回显脚本正文，不推测授权 |
-| `doctor` | 只读检查项目资产、配置/映射和`test/.cache/`的Git忽略规则；不补文件、不修改`.gitignore`或启动run |
+| `doctor` | 只读检查项目资产、配置/映射、`test/.cache/`的Git忽略规则及是否已有文件进入Git索引；不补文件、不修改`.gitignore`或启动run |
 | `preflight --owner NAME [--run RUN] [--input FILE]` | 本地诊断及一次start/renew，汇总已提供的真实来源观察、完整发现JSON与覆盖差集；不访问远端或执行测试，未提供输入保持unknown |
 | `validate-input --run RUN --owner NAME --type TYPE --input FILE` | 无副作用重放record或collect-results门禁；TYPE=source/execution/record/report_bundle，不提交状态、coverage或创建锁 |
 | `attempt-init --run RUN --owner NAME --bundle ID --input FILE` | 按真实计划创建新attempt与输出参数；无执行时间/退出码，不执行CLI，拒绝覆盖 |
@@ -52,7 +52,7 @@ schema_version=2的Attempt计划记录regression_mode=affected/full、可选完�
 
 简报含run_id/freshness_marker/claim/acceptance、counts（selected_cases/ready/blocked/work_needed/executions）、blocked_cases/regression_ready/work_needed/work_needed_reasons/next_steps、missing_configuration及configuration_drift/coverage_asset_drift。不扫描历史run：省略`global_residual_runs`并置`global_residuals_checked=false`，不把未检查当作零残留。完整status/report及最终验收继续做跨run残留核对和既有安全检查；简报只减少重复输出/扫描，不放宽提交、绑定或验收门禁。无需为每次简报追加完整查询，只有诊断或最终安全核对需要时才展开。
 
-work_needed_reasons可直接定位review_not_approved、implementation_not_valid、acceptance_version_mismatch:R1、requirement_review_not_approved:R1、duplicate_test_id:C1/C2、missing_plan_file:path或missing_spec_file:path，按实际原因修复，不为取得完整状态重跑测试。doctor无写入（包括不获取会创建目录的项目锁），聚合缺失/解析/资产/配置/Git忽略错误，存在错误exit2。
+work_needed_reasons可直接定位review_not_approved、implementation_not_valid、acceptance_version_mismatch:R1、requirement_review_not_approved:R1、duplicate_test_id:C1/C2、missing_plan_file:path或missing_spec_file:path，按实际原因修复，不为取得完整状态重跑测试。doctor无写入（包括不获取会创建目录的项目锁），聚合缺失/解析/资产/配置/Git忽略及索引错误，存在错误exit2；忽略规则正确不代表缓存未被跟踪。
 
 覆盖资格、文件存在性及来源影响只在同一状态视图/连续execution批次中复用；非execution事件清除批次缓存，恢复重新计算。性能优化不缓存跨轮批准或跳过原始证据核验，不承诺固定耗时/倍数。
 
@@ -61,12 +61,13 @@ work_needed_reasons可直接定位review_not_approved、implementation_not_valid
 - `record/report/release/renew`等写操作要求当前owner及有效占用。新run默认3600秒，写状态续租；旧run沿用已登记租期，缺省300秒，不因升级延长旧占用。预计长操作超过剩余租期才renew；真正中断用start --resume、最新来源观察及recovery_review。
 - run存于`test/.cache/runs/<UTC时间>-<随机后缀>/`。恢复必须匹配本轮scope子集/固定范围；与新subset重叠的未结束run须先继续或明确结束为partially_blocked，不能绕过旧待决项。结束run可显式resume调查，再回归用new-round。
 - 新轮从各模块最近结束run承接未完任务、人审、issue、失效、半成品case及残留资源；标记inherited_from/inherited_runs/origin_run，ID冲突用`原runID::原ID`。不继承旧execution、usage、bundle或绑定错误；资源保留created_by_run和准确record_id。
+- automation_expansion事件不自动继承。同一任务因技术原因新建run时，按[授权复用](workflow.md#授权复用与自动推进)核实原授权仍有效，以当前清单重新登记并引用原始指令和证据；不复用旧任务“仅本轮”的选择或无法核实的历史决定。
 - `prepare-regression`同轮freshness_marker、配置和scope有效时返回`preflight_reused=true`，不重新扫描/累计文件或时间。扩scope重建扩展计划，可回收原受保护的混合模块bundle；恢复/配置变化使预检失效，代码coverage维护不重复报告清理。retention.before_regression=false只记录明确配置跳过。
 - 预检提交在锁内重读最新状态，合并cleanup_batches与已检查scopes；plan_scopes单独记录实际删除计划范围（旧格式回退scopes），缓存复用依据它。并发a-only/b-only不能证明a+b混合bundle已清，下次全scope预检仍需联合扫描，不重复累计旧批次。
 
 ## Git资产
 
-`test/spec.md`中唯一的`json workflow-config`围栏块为配置来源；初始值见[模板](../assets/spec.template.md)。
+工作流元数据固定使用`test/spec.md`、`test/plans/coverage.json`和`test/.cache/`；`test/spec.md`中唯一的`json workflow-config`围栏块为工作流配置来源，初始值见[模板](../assets/spec.template.md)。已有测试、fixture、Playwright配置及命令cwd沿用项目布局，以coverage的spec/plan、真实发现及Attempt的cwd绑定；`test/src/`仅为新工程建议。直接回归无需初始化这些资产，调度配置可单独指定[config_path](#双预算与就绪任务)。
 
 | 字段 | 配置含义/默认值 |
 | --- | --- |
@@ -78,7 +79,7 @@ work_needed_reasons可直接定位review_not_approved、implementation_not_valid
 | `identity_pools` | 可选，`{<池名>: {max_accounts: 正整数}}`；未声明的池不能登记或租用，上限计入disabled/quarantined及在途intent |
 | `regression`、`retention` | final=all_existing_automation；before_regression=true、reports=summary_and_unresolved_evidence。旧配置缺项按默认读，显式选择不重写 |
 
-init不修改`.gitignore`；写入来源、认证或run证据前，writer必须核实`test/.cache/`被Git忽略，缺兼容规则时补`/test/.cache/`。既有spec没有配置块时按init的spec.workflow-config缺项在原文件补齐。
+init不修改`.gitignore`；写入来源、认证或run证据前，writer必须核实`test/.cache/`被Git忽略且无文件进入Git索引，缺兼容规则时补`/test/.cache/`。已作为工作流配置的spec缺配置块时在原文件补齐；直接回归不为调度修改同名的无关文档。
 
 coverage顶层：`{"schema_version":1,"scopes":[],"sources":{},"requirements":{},"cases":{}}`。scopes与scope.fixed相同，ID稳定，不按标题再生成。
 
@@ -94,7 +95,7 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 
 活动需求与未退役case须双向映射且scope/source一致。退役case留在登记/报告中，可从活动需求移除；最后一个case退役须同时退役需求或提供替代映射。legacy组合只有逐case的steps.result及本地证据才能传播逐例结果，不计独立覆盖。
 
-每轮真实发现与需求/计划/coverage做完整差集，按模块汇总缺口后由用户选择新增范围，见[工作流](workflow.md#覆盖缺口门禁与模块补全)。all_existing_automation规定收尾执行集合；补写缺口以本轮用户选择为准。status/validate不证明语义完整。
+新增覆盖及完整需求验收按[工作流](workflow.md#覆盖缺口门禁与模块补全)核对真实发现与需求/计划/coverage差集；定向复测仅核对相关映射。新增范围按[授权复用](workflow.md#授权复用与自动推进)登记，缺少决定时才征询。all_existing_automation规定收尾执行集合，不扩大新增授权；status/validate不证明语义完整。
 
 ## record事件
 
@@ -106,13 +107,13 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 | --- | --- | --- | --- |
 | `source` | source_id、freshness_marker、status | status=`changed/unchanged/unavailable`；observed_revision、observed_fingerprint；changed必填business_change布尔值；baseline_available、cache_hit可选 | marker取当前start；可读来源必须有evidence。unchanged须匹配有效revision/fingerprint；unavailable两观察值均null，不能解释为未变；changed须有观察版本/摘要 |
 | `source`增删量 | 同上 | requirement_delta={added,updated,retired}，均非负整数 | 仅baseline_available=true且有效旧baseline_path文件存在时可记；旧正文缺失不推测增删量。business_change=false也不自动升级baseline |
-| `recovery_review` | environment_checked=true、artifacts_checked=true | invalidate_case_ids、evidence可选 | 完成本次恢复核对；只失效指定case，不复用已失效pass |
+| `recovery_review` | environment_checked=true、artifacts_checked=true | invalidate_case_ids、evidence、attempt_plans可选 | 完成本次恢复核对；只失效指定case，不复用已失效pass；attempt_plans按[Attempt恢复契约](local-tools.md#attempt准备与事件生成)绑定恢复前的未采集调用 |
 
 ### automation_expansion、task、case、baseline
 
 | 事件 | 必填字段 | 条件/可选字段与值 | 门禁 |
 | --- | --- | --- | --- |
-| `automation_expansion` | owner、mode、scopes、gap_case_ids、user_reply、evidence | mode=`modules/all/skip`；scopes为用户选择新增的模块，all取本run全部scope，skip取[]；gap_case_ids为提交给用户的完整缺口清单，含未选模块和待建case的候选ID | 仅主Agent依据真实用户答复登记，evidence包含模块清单和答复；modules仅授权所选scope内列出的ID，all授权完整清单，skip保留缺口并回归已有。选择仅属当前run，新轮不继承 |
+| `automation_expansion` | owner、mode、scopes、gap_case_ids、user_reply、evidence | mode=`modules/all/skip`；scopes为获准新增的模块，all仅用于本run全部scope均获准，skip取[]；指定模块内全部缺口仍用modules；gap_case_ids为当前完整缺口清单，含未选模块和待建case的候选ID | 主Agent依据明确原始指令或范围答复登记；evidence含当前模块清单、用户原话及原始依据。程序仅放行当前run登记的scope与ID；skip保留缺口并回归已有。范围内更新及技术新run重新登记按[授权复用](workflow.md#授权复用与自动推进)，不自动继承事件 |
 | `task` | task_id、phase、status、owner | phase=`impact/clarify/case_review/exploration/code/execution/acceptance`；status=`pending/running/blocked/approved/complete`；case_ids、source_id、affected_case_ids/affected_requirement_ids、evidence可选 | 同task不能改phase；来源审批绑定当时观察版本。需求变化须完成impact/case_review；需要clarify时显式建任务。未完成旧任务恢复后仍阻塞关联case |
 | `task.dispositions` | 非自动化case_review时逐case提供mode、status=approved、acceptance_version、reason、evidence | mode=`manual/hardware/deferred` | case必须在task.case_ids中，mode和版本匹配登记case；有明确理由和已有证据 |
 | `case` | case_id、action | action=`added/updated/retired/unchanged/needs_decision`；exploration/code=`none/pending/running/complete/blocked`（缺省none）；exploration_action=`executed/reused/not_needed/blocked`（缺省not_needed）；code_action=`added/modified/reused/retired/missing`（缺省missing）；coverage、requirements、evidence可选 | 新case需完整coverage；带coverage/requirements或退役须本轮可读来源、变化影响/审批完成，无对应人工阻塞。两映射更新保持Git资产约束 |
@@ -120,6 +121,7 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 
 - impact完成时可精确列受影响case或需求；未列则按该来源本轮全部case失效，未受影响case可继续旧基线回归。
 - case保留最新状态和完整动作历史；本轮added后updated/unchanged仍只计一次added，updated后unchanged仍计一次updated。状态与报告动作分别登记。
+- 用户已明确指定来源/模块内全部缺口时，后续同一来源版本、模块及数据权限内的新ID先更新完整清单和automation_expansion，引用原指令并说明归属，无需重复审批；固定case清单外或超出原授权时才征询。审核与验收由主Agent依据已确认预期和证据登记，机器字段approved不另设人工点击前置。
 - 新增自动化case/code及缺口case的探索/代码推进须匹配automation_expansion的模块和case清单；缺口来自接管时的代码资格及preflight真实发现。脚本拒绝未获选范围的新增回执，已有合格测试的执行不依赖新增选择。仅登记候选/待决事项保持待补；实际文件编辑与浏览器启动前由执行者落实同一门禁。summary/status及Markdown保留选择和未选/待选择的缺口，完整需求验收继续检查真实覆盖。
 - 带coverage/requirements时先原子写coverage再写state，更新预期指纹；这是跨文件提交，不是数据库事务，中断后须恢复核对。
 
@@ -129,7 +131,7 @@ test_id唯一性检查只针对未退役且非legacy_group的case。多个legacy
 | --- | --- | --- | --- |
 | `resource` | resource_id、status、created_by_run | status=`intent/confirmed/ambiguous/absence_verified/retained_verified`；kind、record_id、identifying_fields、evidence可选；confirmed必填owned=true、receipt | 初建只能intent；resource_id是本地意图ID，服务端准确record_id可确认后补。普通资源未指定的kind可在后续转换时补填，已指定则不可改；不得事后转为shared_config。只建议清理所有权证明完整的confirmed；ambiguous先核实，前缀不证明所有权。shared_config和retained_verified见表后说明 |
 | `human` | request_id、status；初建mode | status=`pending_notification/waiting/blocked/approved/rejected/resolved`；mode=`explicit_decision/observable`，后续不可改；case_ids、source_id、evidence可选；timeout_seconds缺省配置上限300 | 主Agent通知/登记；超时推导blocked，无后台轮询。解除须已有请求；observable用resolved+evidence，explicit_decision须approved/rejected，后者仍阻塞，时间/页面可用不能代替审批 |
-| `delegation` | status、reason | status=`unavailable/available`；case_ids可选 | unavailable阻塞对应工作，不声称已委派；available解除相同case集合的委派阻塞 |
+| `delegation` | status、reason | status=`unavailable/available`；case_ids可选 | unavailable阻塞对应工作，不声称已委派；available解除相同case集合的委派阻塞。主Agent可接续时不因缺少子Agent能力登记委派阻塞 |
 
 资源转换仅允许intent→confirmed/ambiguous/absence_verified、ambiguous→confirmed/absence_verified、confirmed→absence_verified/retained_verified；absence_verified必有证据。
 
@@ -232,12 +234,15 @@ report返回summary、report_bundles、可选merged_report、report_consistency�
 
 | 输入/结果 | 字段与约束 |
 | --- | --- |
+| config_path | 请求顶层可选字段；默认`test/spec.md`，字符串为项目内相对Markdown路径，读取其中唯一的workflow-config块；明确直接执行时可显式传null，不读取配置文件，使用默认值及请求的concurrency覆盖，避开无关同名文档 |
 | resources | available_cpus、available_memory_bytes、available_agent_slots、independent_tasks、pressure，未知null；尽力探测CPU/内存，Agent空槽由宿主提供 |
 | tasks[task_id] | phase/status/owner/dependencies/writable_paths/conflict_keys/case_ids/isolation；readable_paths可选，缺省[]；实际传递fixture/helper/配置/认证输入由执行者声明 |
 | isolation | 核实隔离用verified；无写集也填[]。未知只在自己isolation_group/case范围串行，无范围则保守串行 |
 | quota | agents/exploration_browsers/playwright_workers；CLI workers必须等于实际--workers，与探索浏览器共享上限 |
 | acquire | 原子重核预算/就绪；仅acquired=true可启动；false含配额/冲突原因，不先重复budget/ready |
 | release/reap | release用lease_id/release_token，teardown后释放；reap须同宿主owner_pid确认死亡或规范workflow任务终态，不按超时猜回收 |
+
+config_path只选择调度配置，不改变工作流元数据位置。所有调用保持同一PROJECT，共享规范的`test/.cache/scheduling`配额账本与`test/.cache/resource-residuals.json`残留索引，不通过更换目录拆分安全状态。
 
 ```json
 {"run_id":"RUN","owner":"worker-a","owner_pid":12345,"task_id":"explore-a",

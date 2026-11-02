@@ -18,11 +18,11 @@
 ## 前置条件
 
 - Python 3.10+；本仓库脚本与单元测试仅依赖标准库，无需 `pip install`。
-- Agent 环境中已安装并可使用 `ego-browser` 技能及其 ego-lite 浏览器集成；本仓库不分发该依赖。
-- 目标项目已按自身要求安装 Node.js、Playwright、浏览器和其他测试依赖。
-- 已确认的需求来源、测试环境、身份权限和专用 E2E 数据策略。
+- 执行已有自动化时，目标项目按自身要求具备 Node.js、Playwright、浏览器及必要夹具；直接回归无需 ego-browser 或需求来源读取工具。
+- 新增页面探索默认使用 `ego-browser` 技能及 ego-lite 集成；本仓库不分发该依赖。资料读取工具仅在核验对应来源时需要。
+- 按当前阶段确认需求预期、测试环境、身份权限和 E2E 数据边界；已有回归沿用既有预期。
 
-没有可用浏览器集成时，不把本地脚本自测当作页面探索或产品 E2E 通过。
+依赖安装和浏览器下载复用已有有效授权，并遵守宿主文件与命令审批；仅缺少授权或需人工参与时请求用户。本地脚本自测不证明页面探索或产品 E2E 通过。
 
 ## 安装与调用
 
@@ -52,7 +52,9 @@ git clone https://github.com/YiuTerran/agent-ui-test-skill.git \
 
 建议在目标**前端工程目录**调用本技能，让Agent按[首次接入引导](references/onboarding.md)识别工程、补齐配置并检查依赖。monorepo沿用实际E2E工作区；纯黑盒项目也可使用独立测试工程。
 
-Agent会引导提供需求文档地址/文件、测试环境、身份和数据边界，并按需询问后端代码库路径；WPS资料工具仅在读取相应来源时需要，详见[WPS 365 插件仓库](https://github.com/YiuTerran/dsh-wps365-plugin)。缺少Playwright、浏览器或ego-lite等依赖时会提示安装与验证，不自动下载或登录。随后梳理需求、请用户选择首轮范围，先跑通一个代表流程及清理，再扩展用例。
+Agent会复用已有输入，集中补充需求来源、测试环境、身份和数据边界；后端源码可不提供。WPS工具仅在读取相应来源时需要，详见[WPS 365 插件仓库](https://github.com/YiuTerran/dsh-wps365-plugin)。按阶段检查依赖，沿用已有安装授权及宿主审批；人工认证只阻塞相关任务。
+
+用户已明确要求补齐指定需求/模块内全部缺口时，直接以原始指令和证据登记当前清单；同一授权内的新缺口更新登记，范围不明确或越界时才征询。同一任务的技术新run核实授权仍有效后，以当前清单和原始授权证据重新登记，不自动继承旧事件或旧任务“仅本轮”的选择，见[授权复用与自动推进](references/workflow.md#授权复用与自动推进)。先验证代表流程及清理，再持续推进获准目标。
 
 以下为 POSIX shell 示例；Windows 使用 `py -3` 和对应的 PowerShell 路径语法。
 
@@ -63,8 +65,9 @@ python3 "$SKILL_DIR/scripts/workflow.py" init --project "$PROJECT"
 ```
 
 `init` 只补齐缺失的 `test/spec.md` 和 `test/plans/coverage.json`，不自动批准配置、不修改 `.gitignore`。
+工作流元数据固定在这些文件和 `test/.cache/`；已有测试、fixture、Playwright配置及命令cwd沿用项目布局，以coverage的spec/plan、真实发现及Attempt的cwd绑定，`test/src/`仅为新工程建议。直接回归无需初始化；调度请求的[config_path](references/contracts.md#双预算与就绪任务)可指定项目相对Markdown路径，或显式null跳过无关的test/spec.md，默认仍读取该文件；规范配额账本和残留索引保持同一PROJECT。
 在目标项目中确认配置、固定范围、需求与用例映射，并将 `/test/.cache/` 加入该项目的 `.gitignore`，
-再写入来源、认证或运行证据。需要只读诊断时使用：
+确认缓存无文件进入Git索引后，再写入来源、认证或运行证据。`doctor`同时检查忽略规则和索引状态：
 
 ```sh
 python3 "$SKILL_DIR/scripts/workflow.py" doctor --project "$PROJECT"
@@ -72,6 +75,8 @@ python3 "$SKILL_DIR/scripts/workflow.py" doctor --project "$PROJECT"
 
 完整执行顺序见 [SKILL.md](SKILL.md#最小命令顺序)，输入准备见 [工作流](references/workflow.md)。
 不要将本仓库脚本的合成测试结果登记为目标项目的产品测试证据。
+
+长回归优先复用项目已有恢复能力；[checkpoint sidecar](references/checkpoints.md#一次接入项目runner)是仅适用于retry=0、repeatEach=1的可选单次结果适配器。保留原生retry/repeatEach设置，不适用时走原生采集，配额、冲突组及残留门禁照常执行，不宣称逐case断点复用。
 
 ## 仓库结构
 

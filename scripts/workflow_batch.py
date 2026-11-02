@@ -31,32 +31,8 @@ def attempt_collect(wf, project, args):
             'next_action': 'continue' if collection['complete'] else 'resolve_mapping_without_rerun'}
 
 
-PACKAGE_RUNNERS = {'npx', 'pnpm', 'yarn', 'bunx', 'corepack'}
-SCRIPT_LAUNCHERS = {'node', 'node.exe'}
-PLAYWRIGHT_BINS = {'playwright', 'playwright.cmd', 'playwright.ps1'}
-FORBIDDEN_MERGE_ARGS = {'test', 'install', 'add', 'dlx', 'create', '-c', '--eval', '-e', '--require', '-r',
-                        '--import', '--loader', '--experimental-loader', '-p', '--print'}
-
-
 def check_merge_launcher(wf, command):
-    """Accept a package runner, node + Playwright CLI script, or the Playwright binary itself."""
-    def name(value):
-        return Path(value.replace('\\', '/')).name.lower()
-
-    last, first = command[-1].replace('\\', '/'), name(command[0])
-    wf.check(not any(x in command for x in FORBIDDEN_MERGE_ARGS),
-             'merge.command must be a local offline launcher without test/install/eval/preload arguments')
-    if first in PLAYWRIGHT_BINS:
-        wf.check(len(command) == 1, 'a direct Playwright binary takes no launcher arguments')
-    elif first in SCRIPT_LAUNCHERS:
-        parts = [p.lower() for p in Path(last).parts[:-1]]
-        wf.check(len(command) == 2 and name(last) in {'cli.js', 'playwright.js'}
-                 and 'node_modules' in parts and bool({'@playwright', 'playwright', 'playwright-core'} & set(parts)),
-                 'node must run only the installed Playwright CLI script')
-    elif first.split('@')[0] in PACKAGE_RUNNERS:
-        wf.check(name(last) in PLAYWRIGHT_BINS, 'package runner must end with the playwright binary name')
-    else:
-        wf.check(False, 'merge.command must start with npx/pnpm/yarn/bunx/corepack, node, or playwright')
+    wf.report_artifacts.check_merge_launcher(command)
 
 
 def merge_reports(wf, project, state, request):
@@ -170,8 +146,15 @@ def finalize(wf, project, args):
                  and not state.get('recovery_required'), 'review changed inputs before finalization')
         config_digest, coverage_digest = wf.fingerprint(spec), wf.fingerprint(cov)
         # An unfinished checkpoint may take a revised decision; applied receipts are never replayed.
-        wf.check(not checkpoint or checkpoint['owner'] == args.owner,
-                 'unfinished finalization belongs to a different owner')
+        adoption = None
+        if checkpoint and checkpoint['owner'] != args.owner:
+            wf.check(not checkpoint.get('result'), 'completed finalization belongs to a different owner')
+            reclaims = [entry for entry in state.get('resume_history', [])
+                        if entry.get('owner') == args.owner and entry.get('reclaimed') is True
+                        and wf.dt(entry['at']) >= wf.dt(checkpoint['recorded_at'])]
+            wf.check(reclaims, 'unfinished finalization belongs to a different owner; explicit reclaim required')
+            adoption = {'from_owner': checkpoint['owner'], 'to_owner': args.owner,
+                        'at': wf.now(), 'resume_at': reclaims[-1]['at']}
         before = wf.fingerprint(state)
     # A registered merge that still covers every bundle is rechecked by write_report, not rerun.
     merged = None
@@ -199,7 +182,7 @@ def finalize(wf, project, args):
         if batch:
             current, newcov = wf.apply_events(project, current, spec, cov, args.owner, batch)
             wf.check(newcov == cov, 'finalize cannot change coverage')
-        if not prior or prior['input_sha256'] != digest or batch:
+        if not prior or prior['input_sha256'] != digest or batch or adoption:
             history = list(prior.get('superseded_inputs', []))
             if prior and prior['input_sha256'] != digest:
                 history.append({'input_sha256': prior['input_sha256'], 'recorded_at': prior['recorded_at']})
@@ -207,6 +190,9 @@ def finalize(wf, project, args):
                 'input_sha256': digest, 'owner': args.owner, 'recorded_at': wf.now(),
                 'applied_event_sha256': applied + [wf.fingerprint(e) for e in batch if e is not merged],
                 'superseded_inputs': history}
+            owner_history = list(prior.get('owner_history', [])) + ([adoption] if adoption else [])
+            if owner_history:
+                current['finalization']['owner_history'] = owner_history
             wf.sync_recorded_pools(project, current, batch)
             wf.atomic(wf.run_path(project, args.run) / 'state.json', current)
         # Keep terminal acceptance tentative until report and target checks succeed.
