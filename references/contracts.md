@@ -2,7 +2,7 @@
 
 按需查阅：[CLI](#cli)、[Git资产](#git资产)、[事件字段](#record事件)、[cleanup_state回读契约](#checkpoint的cleanup_state与回读证明)、[状态与统计](#状态与统计)、[辅助脚本](#提速辅助脚本)、[回收](#运行历史回收)、[平台与故障](#平台与故障边界)。最小顺序见[工作流](workflow.md#最小命令顺序)，报告绑定细节见[报告](reports.md)。
 
-Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启动Agent、执行产品测试或删除业务数据。除`--help`外输出JSON；成功exit0，输入/占用/门禁失败exit2并含`error`。输入不得含密钥、Cookie、token或原始认证响应；`authref`只存引用，字段过滤不能替代保密责任。
+Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启动Agent、执行产品测试或删除业务数据；[锁契约检查](local-tools.md#fixture锁契约检查)按显式请求启动项目纯本地adapter，验证临时目录内的锁与分配行为，调用前核实adapter符合离线边界。除`--help`外输出JSON；成功exit0，输入/占用/门禁失败exit2并含`error`或探针的`error_type`。输入不得含密钥、Cookie、token或原始认证响应；`authref`只存引用，字段过滤不能替代保密责任。
 
 ## CLI
 

@@ -1,6 +1,6 @@
 # 本地辅助入口
 
-用于减少临时脚本和字段试错。除注明的独立入口外，本页命令经`workflow.py`调用，Python最低3.10、仅用标准库，入口自动检查实际解释器版本；不执行产品测试；`finalize`可调用已安装的本地Playwright离线合并，禁止下载依赖；`valid=true`只描述该命令的检查结果。原有start/renew/record/collect-results等命令继续可用
+用于减少临时脚本和字段试错。除注明的独立入口外，本页命令经`workflow.py`调用，Python最低3.10、仅用标准库，入口自动检查实际解释器版本；不执行产品测试；锁契约检查按显式输入启动项目离线adapter子进程，`finalize`可调用已安装的本地Playwright离线合并，禁止下载依赖；`valid=true`只描述该命令的检查结果。原有start/renew/record/collect-results等命令继续可用
 
 长回归优先复用项目已有恢复能力；独立入口`checkpoint.py`、Playwright sidecar与`work_packages.py`见[断点调度与有限工作包](checkpoints.md)。sidecar是可选的单次结果适配器，仅用于兼容retry=0、repeatEach=1的suite；保留原有重试/重复执行时使用原生采集，不声称逐case断点复用。配额、冲突组、残留派发门禁及验收照常执行。
 
@@ -54,6 +54,52 @@ python3 "$WF" finalize --project "$PROJECT" --run "$RUN" --owner "$OWNER" --inpu
 - 合并失败保留merge.log和真实command.json，不登记成功、不记录验收终态；进程异常/超时保留现有文件，未取得真实退出码时不造回执。租约/权限错误按原入口处理，不另建run绕过
 
 底层attempt-bundle/collect-results/record/report/release保留用于诊断、真实恢复和特殊兼容；正常路径不与组合入口重复运行。收尾程序完成后直接交付，读完整状态或重建报告只在新的实际异常时进行。
+
+## fixture锁契约检查
+
+独立入口`fixture_lock_probe.py`以真实竞争、正常退出及强制终止验证项目fixture的锁和分配临界区，Python3.10+标准库实现。项目提供纯本地adapter，直接复用实际fixture实现，并将全部测试状态重定向到请求中的独立临时目录；不访问业务API、登录、真实手机号池或既有锁，不启动浏览器。该脚本不回收项目遗留锁，也不证明身份租约或业务资源已清理。
+
+输入JSON示例：
+
+```json
+{
+  "command": ["node", "test/scripts/fixture-lock-adapter.mjs"],
+  "inputs": ["test/scripts/fixture-lock-adapter.mjs", "test/src/fixtures/identity-storage.ts"],
+  "timeout_seconds": 10,
+  "acquire_timeout_ms": 250,
+  "workers": 4
+}
+```
+
+`command`是已核实的本地adapter启动argv，shell=false、cwd=PROJECT、继承环境，不安装依赖。`inputs`必填且非空，列全adapter、实际锁实现、分配临界区及影响它们的本地依赖/配置的项目相对文件，拒绝穿越、符号链接及reparse祖先；不放凭据。`directory`可选，默认`test/.cache/fixture-lock-probes`，限制与运行时探针相同；仅删除本次新建的临时子目录。`timeout_seconds`为每次协议等待/进程退出上限，范围1–30秒；`acquire_timeout_ms`为adapter实际获锁等待预算，范围50–5000毫秒，须比前者至少短0.5秒；`workers`为并发分配进程数，范围2–8。默认值如上。
+
+### 项目adapter协议
+
+每次直接启动一个adapter进程；可用Node、Python等项目现有运行时，不再包一层持锁守护进程或后台worker。stdin/stdout使用UTF-8逐行协议，stdout只写下表消息并立即flush，诊断使用stderr；检查结果不回显adapter stdout/stderr、分配值或命令。
+
+| 阶段 | 输入或adapter行为 |
+| --- | --- |
+| 初始化 | stdin首行JSON：`{"protocol_version":1,"directory":"<本次绝对临时目录>","operation":"hold或reserve","acquire_timeout_ms":250}`；从该目录构造实际fixture的测试池，输出`{"status":"ready"}` |
+| 开始 | 等待stdin下一行`go`，收到后才获取锁或读取分配状态 |
+| hold | 取得实际池锁后输出`{"status":"acquired"}`，持续持有同一把锁，等待stdin的`release`；真实解锁后输出`{"status":"released"}`并exit0 |
+| reserve成功 | 在实际分配临界区完成读取、唯一标识分配和持久化，释放锁，输出`{"status":"allocated","value":"<本地合成标识>"}`并exit0；分配保留到本次临时目录销毁，不立即归还 |
+| reserve占用 | 只有确认因同一把锁竞争而耗尽获锁预算时，输出`{"status":"blocked"}`并exit2；权限、配置、解析或其他错误不能冒充竞争 |
+
+hold与reserve必须使用同一实际锁，reserve复用实际分配逻辑，不能在adapter里另写一套演示锁/计数器代替。分配值须为非空字符串。adapter自身不得派生子进程，强制终止对象必须就是持锁者；异常退出和EOF须保留真实语义，不预先清理遗留哨兵来制造通过。
+
+检查按顺序执行：活持有者在场时reserve须受阻且不能替换持有者；正常释放后可再次分配；强制终止新持有者并等待其退出后可再次分配；多个已ready的进程同时收到go，所有成功分配互异，且不重复此前两次仍保留的分配。没有崩溃恢复能力的存在性哨兵会在`killed_owner_releases`失败；检查不会代它删锁。共享文件应在整个读改写期间持锁，先读后锁造成的重复分配会由并发阶段拒绝。
+
+### 接入runner门禁
+
+```sh
+python3 "$SKILL_DIR/scripts/fixture_lock_probe.py" --project "$PROJECT" --input "$LOCK_PROBE_INPUT" \
+  > "$LOCK_PROBE_RESULT" && \
+  python3 "$RUNNER" "$@"
+```
+
+`RUNNER`替换为项目真实启动入口；检查应在该入口的产品CLI spawn之前接入，或由runner调用脚本并检查真实退出码。失败exit2，含`valid:false/stage/error_type/checks`，停止依赖该锁的派发；不能捕获后继续。成功exit0，含逐阶段checks、分配数量及绑定命令/声明输入hash/参数的`adapter_fingerprint`，不登记业务结果或解除残留门禁。检查前后核对inputs字节未变。实际锁实现、分配逻辑、adapter、运行时、cwd或继承环境变化后重检；fingerprint不自动枚举依赖或证明runner已接入，项目自行确保声明完整与复用条件成立。
+
+首次接入离线验证“adapter缺失、锁检查失败均不会启动产品CLI”。多种独立锁分别配置和检查；无跨进程fixture锁时不要求接入。不兼容此协议的既有等价契约测试可继续使用，但须实际覆盖上述行为并绑定真实实现，不用本仓库自身的内核锁单测充当项目接入证明。
 
 ## 统一预检
 

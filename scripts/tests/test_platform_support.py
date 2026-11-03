@@ -43,7 +43,8 @@ class PlatformTest(unittest.TestCase):
             'sys.version_info = (3, 9, 21, "final", 0); '
             'runpy.run_path(sys.argv[0], run_name="__main__")')
         for entry in ['workflow.py', 'scheduling.py', 'checkpoint.py', 'work_packages.py',
-                      'retention.py', 'source_cache.py', 'import_results.py', 'runtime_probe.py']:
+                      'retention.py', 'source_cache.py', 'import_results.py', 'runtime_probe.py',
+                      'fixture_lock_probe.py']:
             with self.subTest(entry=entry):
                 path = MODULE.with_name(entry)
                 result = subprocess.run([sys.executable, '-c', code, str(path)],
@@ -140,6 +141,33 @@ class PlatformTest(unittest.TestCase):
                 with p.file_lock(stream.fileno()):
                     self.fail('failed initialization must not enter protected work')
         self.assertEqual([fake.LK_NBLCK, fake.LK_UNLCK], calls)
+
+    @unittest.skipIf(os.name == 'nt', 'requires POSIX flock')
+    def test_posix_lock_timeout_is_bounded_and_never_unlocks_unacquired_lock(self):
+        import fcntl
+        with tempfile.TemporaryFile('w+b') as stream, \
+                mock.patch.object(fcntl, 'flock', side_effect=BlockingIOError(errno.EAGAIN, 'busy')) as lock:
+            with self.assertRaises(TimeoutError):
+                with p.file_lock(stream.fileno(), timeout=0):
+                    self.fail('must not acquire')
+            lock.assert_called_once_with(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @unittest.skipIf(os.name == 'nt', 'requires POSIX flock')
+    def test_posix_lock_retries_contention_and_preserves_other_errors(self):
+        import fcntl
+        for error, expected in [(BlockingIOError(errno.EAGAIN, 'busy'), None),
+                                (OSError(errno.EBADF, 'invalid'), OSError)]:
+            with tempfile.TemporaryFile('w+b') as stream, \
+                    mock.patch.object(fcntl, 'flock', side_effect=[error, None, None]) as lock, \
+                    mock.patch.object(p.time, 'sleep'):
+                if expected:
+                    with self.assertRaises(expected):
+                        with p.file_lock(stream.fileno(), timeout=1):
+                            self.fail('must not acquire')
+                else:
+                    with p.file_lock(stream.fileno(), timeout=1):
+                        pass
+                    self.assertEqual(3, lock.call_count)
 
     def test_windows_directory_sync_never_uses_unsupported_directory_open(self):
         with mock.patch.object(p, 'WINDOWS', True), mock.patch.object(p.os, 'open') as opened:

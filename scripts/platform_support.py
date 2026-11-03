@@ -77,7 +77,17 @@ def file_lock(fd, timeout=120):
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
     else:
         import fcntl
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('timed out waiting for local workflow lock') from error
+                time.sleep(.05)
         try:
             yield
         finally:
