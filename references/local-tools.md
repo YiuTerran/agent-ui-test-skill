@@ -148,6 +148,32 @@ type取source、execution、record或report_bundle。前三种在state/coverage�
 
 合法但映射不完整的bundle返回valid=true及collection.complete=false/unresolved，与collect-results语义一致；不能解释为通过。真正提交仍重新检查当前状态。正常固定模板直接提交，只有新字段、混合事件或诊断需要时预校验，避免重复读取大报告
 
+## Playwright进度输出
+
+优先复用项目runner已有精简进度。缺少稳定计数时，可追加随附`scripts/progress_playwright_reporter.mjs`，独立于workflow/checkpoint，不需要manifest，不改变retry/repeatEach，也不写状态、创建产物目录或启动测试。每次CLI有独立计数，不能把多个进程的摘要直接相加当整轮去重结果。
+
+沿用项目Playwright配置中的原有reporters，在数组末尾追加以下条目，路径替换为实际技能目录；`setupProjects`必须来自已核实的本轮配置，无Setup时显式填`[]`：
+
+```js
+['<SKILL>/scripts/progress_playwright_reporter.mjs', {
+  intervalMs: 30000,
+  setupProjects: ['auth'],
+}]
+```
+
+使用attempt-init覆盖reporter参数时，把该脚本绝对路径加入`extra_reporters`。CLI方式无法传options，可由项目runner设置`E2E_PROGRESS_INTERVAL_MS=30000`和`E2E_PROGRESS_SETUP_PROJECTS='["auth"]'`（JSON数组）；配置options优先。间隔允许1000–60000毫秒，默认30000。不为接入剥离其他环境变量。未提供Setup分类时，`counts`仅表示全部test，`business/setup`为null，不冒充业务数。保留原生JSON/HTML/blob及其实际输出位置，不用进度输出替代正式证据。
+
+脚本在发现完成、每个心跳和runner的onEnd输出一行`E2E_PROGRESS {JSON}`。schema_version=1，sequence为本进程递增序号，phase为testing或runner_ended；另含runner_status、elapsed_seconds、seconds_since_test_event、workers、shard和global_errors数量。只输出计数，不含用例标题、路径、错误正文或凭据。Agent读取新增行后按[汇报要求](workflow.md#进度汇报与长任务等待)转成用户可见简报；宿主若缓存stdout，脚本不能单独保证实时对话。
+
+`counts`及已明确分类后的`business/setup`口径相同：
+
+- total为本次实际发现的test实例数，区分project与repeat；重试不增加total。
+- ended=passed+failed+skipped+expected_failed；expected_failed是符合预期的失败，单列不混入真实通过数。failed包括最终失败、超时及预期失败却意外通过。skipped仅统计runner实际提供的跳过结果。
+- remaining=total−ended，包含pending、running、retry_pending和interrupted。未知阻塞原因不能从这些计数推断；interrupted保留为未完成。重试耗尽前的失败仍在retry_pending；runner提前结束时按已发生的最后结果结算，无结果的test继续保持pending。
+- retried为发生过重试的test数，flaky为重试后符合预期的test数，均不增加ended。串行组重试可能重新运行此前已通过的test，运行中计数会重新打开该实例，实时ended可回退；原生最终报告仍为准。
+
+runner_ended仅表示收到runner终态；不证明资源已清理、配额已释放、报告已采集或整轮已验收。强制终止可能没有终态行，最后心跳仍是旧观察；主Agent说明日志新鲜度并沿正常中断与清理流程处理。配置/发现阶段失败而未收到onBegin时，counts为null；无新test事件的心跳不推断卡死或ETA。
+
 ## Attempt准备与事件生成
 
 准备输入是实际执行计划，不含凭据。元数据仍在规范的test目录，已有spec、fixture和Playwright配置沿用原位置，cwd取实际项目命令目录，不为接入搬迁代码：
@@ -167,7 +193,7 @@ type取source、execution、record或report_bundle。前三种在state/coverage�
 python3 "$WF" attempt-init --project "$PROJECT" --run "$RUN" --owner "$OWNER" --bundle cli-01 --input "$ATTEMPT_INPUT"
 ```
 
-可选`extra_reporters`为现有reporter文件路径数组：项目内相对路径从PROJECT解析；项目外绝对路径仅允许当前技能随附的`checkpoint_playwright_reporter.mjs`。准备时核对文件存在、路径无逗号且不重复，计划保存解析后的绝对路径，返回的reporter参数在list/json/html/blob后追加它们。CLI的`--reporter`会替换配置中的reporters，不能只在Playwright配置里追加sidecar后继续使用默认覆盖参数。其他自定义reporter或需要options的reporter也可保留在项目配置中，同时配置原生JSON/HTML/blob及对应输出位置，并省略返回的reporter参数组；最终仍按真实产物核验。
+可选`extra_reporters`为现有reporter文件路径数组：项目内相对路径从PROJECT解析；项目外绝对路径仅允许当前技能随附的`checkpoint_playwright_reporter.mjs`和`progress_playwright_reporter.mjs`。准备时核对文件存在、路径无逗号且不重复，计划保存解析后的绝对路径，返回的reporter参数在list/json/html/blob后追加它们。CLI的`--reporter`会替换配置中的reporters，不能只在Playwright配置里追加sidecar后继续使用默认覆盖参数。其他自定义reporter或需要options的reporter也可保留在项目配置中，同时配置原生JSON/HTML/blob及对应输出位置，并省略返回的reporter参数组；最终仍按真实产物核验。
 
 先在同级临时目录准备plan.json和全部子目录，再整体rename发布到`attempts/cli-01`；写入或发布失败只清理本次临时目录，同一个bundle ID可重试。进程被直接终止而遗留的点开头临时目录由retention保留并跳过，不作为bundle回收。返回JSON/HTML/blob环境变量及reporter/output参数数组，其中输出目录是当前执行主机的绝对路径。CI容器、挂载位置或cwd不同，应在实际执行文件系统中准备Attempt并应用对应路径。由执行者使用当前shell的安全引用方式应用，不把JSON数组直接拼成shell命令。沿用项目安装版本和密钥注入，领取真实配额后执行，teardown完成才释放
 

@@ -272,12 +272,13 @@ def attempt_init(wf, project, args):
         if 'extra_reporters' in request:
             string_array(wf, request['extra_reporters'], 'extra_reporters')
             reporters = []
-            shipped = Path(__file__).with_name('checkpoint_playwright_reporter.mjs').resolve()
+            shipped = {Path(__file__).with_name(name).resolve() for name in (
+                'checkpoint_playwright_reporter.mjs', 'progress_playwright_reporter.mjs')}
             for value in request['extra_reporters']:
                 wf.check(',' not in value, 'extra reporter paths must not contain commas')
                 if Path(value).is_absolute():
                     path = Path(value).resolve()
-                    wf.check(path == shipped, 'absolute extra reporter must be the shipped checkpoint sidecar')
+                    wf.check(path in shipped, 'absolute extra reporter must be a shipped reporter')
                 else:
                     path = wf.safe_path(project, value)
                 wf.check(path.is_file() and ',' not in str(path), 'extra reporter must be an existing file without commas')

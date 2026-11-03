@@ -224,6 +224,18 @@ class ExtraReportersTest(unittest.TestCase):
                          '--input', str(self.project / 'attempt.json'), fail=True)
                 self.assertFalse((self.project / f'test/.cache/runs/{self.run}/attempts/E1').exists())
 
+    def test_shipped_progress_reporter_survives_attempt_command_validation(self):
+        self.start('--scopes', 'a')
+        reporter = Path(wf.__file__).with_name('progress_playwright_reporter.mjs').resolve()
+        result = self.init_attempt(extra_reporters=[str(reporter)])
+        plan = wf.load(self.project / result['plan'])
+        self.assertEqual([str(reporter)], plan['extra_reporters'])
+        self.assertEqual('--reporter=list,json,html,blob,' + str(reporter),
+                         result['reporter_arguments'][0])
+        directory = (self.project / result['plan']).resolve().parent
+        wf.report_artifacts.check_attempt_command(
+            plan, [*plan['command'], *result['reporter_arguments']], directory)
+
 
 if __name__ == '__main__':
     unittest.main()

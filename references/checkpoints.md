@@ -2,6 +2,8 @@
 
 用于需要逐case观察复用的长回归、中断续跑和失败确认；项目已有恢复能力时优先复用。程序负责日志、输入指纹、领取、修复历史和分组；Agent只诊断未知根因、审核依赖闭包及编写修复。以下入口独立于`workflow.py`，不启动产品测试、不修改验收状态、不授予权限、不替代浏览器配额
 
+进度按[用户可见汇报](workflow.md#进度汇报与长任务等待)执行；已接入sidecar时可用新增`case_end`观察更新本批结束数，不为进度另装适配器或改变retry/repeatEach。`plan.counts.ready/reused_observations/blocked`是调度资格统计；blocked包含在途/清理未核验、容量等待等情况，不能直接当失败数或未执行数。恢复复用观察、本轮结果、未决清理分别展示；观察到test结束不代表资源已释放或正式报告已绑定。
+
 ## 一次接入项目runner
 
 先核实suite是否适用：该sidecar每attempt每case只接受一个结果，要求retry=0且repeatEach=1。项目原有重试或重复执行属于本轮目标时，保留原设置，使用原生JSON/blob/HTML及正常attempt-collect，不强行接入sidecar或宣称逐case复用。配额、冲突组及[残留派发门禁](#跨run残留门禁)照常执行。只有项目已采用该单次模型或用户明确同意改变执行语义时才接入，不为长回归自动关闭重试/重复执行。
