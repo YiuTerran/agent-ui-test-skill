@@ -105,9 +105,10 @@ class FixtureLockProbeTest(unittest.TestCase):
         self.retained.write_text('retain', encoding='utf-8')
 
     def request(self, mode='healthy', **extra):
-        return dict(command=[sys.executable, '-u', str(self.adapter),
-                             str(Path(probe.__file__).with_name('platform_support.py')), mode],
-                    inputs=['adapter.py'], timeout_seconds=3, **extra)
+        settings = dict(command=[sys.executable, '-u', str(self.adapter),
+                                 str(Path(probe.__file__).with_name('platform_support.py')), mode],
+                        inputs=['adapter.py'], timeout_seconds=5, acquire_timeout_ms=2000)
+        return dict(settings, **extra)
 
     def inspect(self, mode='healthy', **extra):
         result = probe.inspect(self.project, self.request(mode, **extra))
@@ -176,8 +177,7 @@ class FixtureLockProbeTest(unittest.TestCase):
             started.append(process)
             return process
 
-        request = self.request('silent')
-        request['timeout_seconds'] = 1
+        request = self.request('silent', timeout_seconds=1, acquire_timeout_ms=250)
         with mock.patch.object(probe.subprocess, 'Popen', side_effect=launch):
             result = probe.inspect(self.project, request)
         self.assertFalse(result['valid'], result)
