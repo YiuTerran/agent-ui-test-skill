@@ -45,6 +45,35 @@ class RuntimeProbeTest(unittest.TestCase):
         self.assertFalse(result['valid'], result)
         self.assertEqual('fs_mkdir_not_idempotent', result['checks']['python']['error_type'])
 
+    def test_required_node_missing_fails_without_creating_artifacts(self):
+        with mock.patch.object(rp.subprocess, 'run') as run:
+            result = rp.inspect(self.project, require_node=True)
+        self.assertFalse(result['valid'], result)
+        self.assertEqual('node_required', result['checks']['node']['error_type'])
+        self.assertIn('action', result)
+        self.assertFalse((self.project / 'test').exists())
+        run.assert_not_called()
+
+    def test_required_node_probe_uses_requested_artifact_parent(self):
+        directory = 'test/.cache/attempts/current/results/output'
+        completed = subprocess.CompletedProcess([], 0, '{"valid":true}', '')
+        with mock.patch.object(rp.subprocess, 'run', return_value=completed) as run:
+            result = rp.inspect(self.project, directory, 'project-node', require_node=True)
+        self.assertTrue(result['valid'], result)
+        self.assertTrue(result['checks']['python']['valid'])
+        self.assertTrue(result['checks']['node']['valid'])
+        root = Path(run.call_args.args[0][-1])
+        self.assertEqual(self.project / directory, root.parent)
+        self.assertEqual([], list(root.parent.iterdir()))
+
+    def test_cli_required_node_missing_returns_failure(self):
+        result = subprocess.run([sys.executable, str(Path(rp.__file__)), '--project',
+                                 str(self.project), '--require-node'],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(2, result.returncode, result.stderr + result.stdout)
+        self.assertEqual('node_required', json.loads(result.stdout)['checks']['node']['error_type'])
+        self.assertFalse((self.project / 'test').exists())
+
     def test_permission_denial_fails_and_cleans_probe_directory(self):
         with mock.patch.object(rp.os, 'replace', side_effect=PermissionError):
             result = rp.inspect(self.project)
@@ -123,7 +152,7 @@ class RuntimeProbeTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node is optional for Python tooling')
     def test_real_node_probe_and_cli_exit_code(self):
         result = subprocess.run([sys.executable, str(Path(rp.__file__)), '--project',
-                                 str(self.project), '--node', shutil.which('node')],
+                                 str(self.project), '--node', shutil.which('node'), '--require-node'],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stderr + result.stdout)
         value = json.loads(result.stdout)

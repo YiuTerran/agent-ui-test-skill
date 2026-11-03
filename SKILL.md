@@ -56,7 +56,7 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 - **组合入口优先**：已有真实CLI回执用`attempt-collect`一次生成bundle并采集；全部CLI就绪后用`finalize`一次完成必要原生merge、最终事件、报告核验和释放。已有登记merge直接复用。正常路径不再分开调用对应底层命令；详见[批量入口](references/local-tools.md#确定性批量入口)。
 - **最小输入输出**：正常只读取run/owner、选择范围、必要环境/资源绑定、真实退出码、结果差异和下一命令字段。完整状态、哈希清单、附件副本、历史issue留在文件。不要把大JSON打印后再让模型提取，不复制多份交接摘要；只对受影响证据做一次定点诊断。
 - **归并失败，按版本复测**：按根因归并失败和受影响目标，分别记录测试维护、产品缺陷及环境版本。业务修复与部署交由相应获准流程，不能为完成测试自行发布。环境更新后按本轮约定选择增量复测或当前版本完整验收，复用仍有效的观察。见[外部修复与部署后的复测](references/workflow.md#外部修复与部署后的复测)。
-- **执行前由程序检查**：用[运行时探测](references/local-tools.md#运行时探测)核实实际解释器、Node及产物目录；相同运行环境与路径复用，变化后重检。使用真实选择参数的`--list`核对非空业务目标及Setup，再准备Attempt；选择条件或相关代码未变时复用该发现。一次验证环境/资源绑定、当前marker和配额请求字段；缺项在启动浏览器前失败。探索结束并完成清理后立即释放其配额；仍在运行的探索按真实占用给CLI预留余量，不提前释放或反复申请。凭据不进入回执或对话；登记失败复用原始产物，不重跑业务。
+- **执行前由程序检查**：用[运行时探测](references/local-tools.md#运行时探测)核实实际解释器、Node及产物目录；回归runner启用Node必检并在探针失败时停止CLI派发，相同运行环境与路径复用，变化后重检。使用真实选择参数的`--list`核对非空业务目标及Setup，再准备Attempt；选择条件或相关代码未变时复用该发现。一次验证环境/资源绑定、当前marker和配额请求字段；缺项在启动浏览器前失败。探索结束并完成清理后立即释放其配额；仍在运行的探索按真实占用给CLI预留余量，不提前释放或反复申请。凭据不进入回执或对话；登记失败复用原始产物，不重跑业务。
 - **恢复与结束**：用真实checkpoint/会话接回未完成步骤；通过步骤在输入未变时复用。用户选择增量续跑时，按[断点完成标准](references/checkpoints.md#增量任务的完成标准)收尾，不为formal full字段另跑全量；执行完成、产品全部通过和需求全覆盖分别判断。组合命令成功即交付，不再跑status、逐case扫描、资源副本遍历或重新生成报告。失败先暂停受影响派发并保留安全清理所需占用，由主Agent按自修复路径恢复；能自行解决就续跑，不以“已记录阻塞”代替完成任务。确实无法推进时才交付出错阶段、证据和所需外部动作。
 
 长回归优先复用项目已有恢复能力，按需接入[断点调度与有限工作包](references/checkpoints.md)。sidecar仅用于兼容其单次结果模型的suite，保留项目原有retry/repeatEach语义；未接入时沿用原生结果、配额及残留门禁，不声称逐case断点复用。有明确诊断和修复进展就继续修复测试工具；同根因、同输入和环境且无新证据时转诊断。输入变更只失效相关观察，增量恢复与正式full验收分开。
@@ -104,7 +104,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 用户选择跳过或仅新增部分模块时，保留剩余缺口及决定证据，报告区分本轮新增范围、现有自动化执行与需求覆盖。
 - 需求决定预期，浏览器说明实际行为。业务差异保留证据；业务代码修复需另有授权。
 - 既有业务数据默认只读，共享数据按准确owned证明逆依赖清理；未知创建结果不重试、不猜测删除。用户明确授权整体重置的独占数据域，按获准resource kinds及当前完整盘点执行reset，旧unknown缺逐条receipt不阻挡此恢复路径；保留用户确认的准确保护基线；项目确认的共享/系统数据域禁止reset，不从域名或ID推定隔离性。日常case cleanup与轮末独立scope sweep均实际执行，reset仅凭完整scope absence及实际cleanup_state桥接关闭相关unknown/残留；停源、互斥、分页、依赖及retained规则见[清理与专用域reset](references/cleanup.md)。范围内共享配置按原值恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
-- 清理未决立即通过checkpoint的`cleanup_state`增量登记跨run索引，按稳定环境、kind、准确ID去重，阻断相关写资源包和后续claim；明确只读或无相关资源依赖的case继续。恢复凭匹配资源的absence/retained_verified回读证据，不以test passed、close或普通unblock解除。报告分别列单轮残留、历史累计和本轮清理数量；错误msg先脱敏，见[跨run残留门禁](references/checkpoints.md#跨run残留门禁)。
+- 清理未决立即通过checkpoint的`cleanup_state`增量登记跨run索引，按稳定环境、kind、准确ID去重，阻断相关写资源包和后续claim；明确只读或无相关资源依赖的case继续。恢复前核对[项目资源恢复契约](references/cleanup.md#项目资源恢复契约)中的身份、应用上下文及逐kind缺席语义，再凭匹配资源的absence/retained_verified回读证据恢复，不以test passed、close或普通unblock解除。报告分别列单轮残留、历史累计和本轮清理数量；错误msg先脱敏，见[跨run残留门禁](references/checkpoints.md#跨run残留门禁)。
 - 所有runner启动产品CLI前必须通过残留门禁：使用checkpoint的重新claim，或调用`checkpoint.py gate`并检查退出码。`workflow attempt-init`本身不读取残留索引，非checkpoint runner必须在pre-dispatch接入gate；未知写scope在已有残留时fail closed，明确readonly可继续。升级脚本、生成工作包或成功attempt-init均不代表已接入。
 - 独立case并行、共享资源按账号/组织/配置/数据冲突组局部串行。执行前领取共享配额，teardown后释放；资源信息不足从一个浏览器任务开始。
 - 工作流新run的`native_merge_required=true`：每个结果bundle必须绑定当前schema的Attempt计划及摘要、原始JSON和blob，正常同时生成HTML；完整绑定Setup、业务case、retry及未执行结果，最终合并全部结果blob并核验。直接执行的原始结果单独交付，不冒充已登记bundle或需求验收。中断产物不齐的调用独立登记仅回执，不计结果或完整性。JSON-only保留为旧run的受限兼容路径。失败、重跑后通过及未执行置前，不以缺失证据推断通过。

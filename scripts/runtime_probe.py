@@ -111,7 +111,7 @@ def node_probe(project, root, executable):
     return {key: value[key] for key in ('valid', 'operation', 'error_type') if key in value}
 
 
-def inspect(project, directory='test/.cache/runtime-probes', node=None):
+def inspect(project, directory='test/.cache/runtime-probes', node=None, require_node=False):
     project = Path(project).resolve()
     result = {'valid': False, 'checks': {},
               'python_runtime': {'version': '.'.join(str(part) for part in sys.version_info[:3]),
@@ -123,6 +123,10 @@ def inspect(project, directory='test/.cache/runtime-probes', node=None):
               'sitecustomize_loaded': 'sitecustomize' in sys.modules,
               'note': 'Local filesystem operations only; browser launch, network, product tests '
                       'and business cleanup are not proved. The inherited environment is unchanged.'}
+    if require_node and not node:
+        result['checks']['node'] = {'valid': False, 'error_type': 'node_required'}
+        result['action'] = 'Supply the actual project Node executable and rerun before dispatch.'
+        return result
     root = None
     stage = 'directory'
     try:
@@ -160,8 +164,10 @@ def main(argv=None):
     parser.add_argument('--project', required=True, type=Path)
     parser.add_argument('--directory', default='test/.cache/runtime-probes')
     parser.add_argument('--node', help='actual Node executable used by the project runner')
+    parser.add_argument('--require-node', action='store_true',
+                        help='fail unless the actual project Node executable is supplied and passes')
     args = parser.parse_args(argv)
-    result = inspect(args.project, args.directory, args.node)
+    result = inspect(args.project, args.directory, args.node, args.require_node)
     print(json.dumps(result, ensure_ascii=True, allow_nan=False))
     return 0 if result['valid'] else 2
 

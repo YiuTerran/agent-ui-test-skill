@@ -307,8 +307,9 @@ class ResidualGateTest(unittest.TestCase):
     def test_pass_missing_mismatched_and_unverified_proofs_cannot_clear_gate(self):
         self.cleanup()
         base = dict(resource_environment='tenant-dev', kind='category', id='70', status='absence_verified', verified=True)
-        for delta in [{'status': 'passed'}, {'id': 'other'}, {'kind': 'device'},
-                      {'resource_environment': 'other'}, {'verified': False}, {'verified': 1}]:
+        for delta in [{'status': 'passed'}, {'id': 'other'}, {'id': 70}, {'kind': 'device'},
+                      {'resource_environment': 'other'}, {'verified': False}, {'verified': 1},
+                      {'verified': 'true'}]:
             with self.subTest(delta=delta):
                 (self.root / 'readback.json').write_text(json.dumps(dict(base, **delta)))
                 with self.assertRaisesRegex(ValueError, 'readback proof'):
@@ -316,6 +317,21 @@ class ResidualGateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'missing'):
             self.cleanup(self.resource(status='absence_verified', evidence='missing.json'), eid='missing')
         self.assertNotIn('category', self.call('plan')['ready'])
+
+    def test_nested_index_and_array_cannot_replace_flat_readback_proof(self):
+        self.cleanup()
+        proof = dict(resource_environment='tenant-dev', kind='category', id='70',
+                     status='absence_verified', verified=True)
+        for value in [{'resources': [proof]}, {'resources': {'category:70': proof}}, [proof]]:
+            with self.subTest(value=value):
+                (self.root / 'readback.json').write_text(json.dumps(value))
+                with self.assertRaisesRegex(ValueError, 'readback proof'):
+                    self.cleanup(self.resource(status='absence_verified', evidence='readback.json'),
+                                 eid='nested-proof')
+                self.assertNotIn('category', self.call('plan')['ready'])
+        self.proof()
+        self.cleanup(self.resource(status='absence_verified', evidence='readback.json'), eid='flat-proof')
+        self.assertIn('category', self.call('plan')['ready'])
 
     def test_bad_batch_commits_no_prefix(self):
         self.proof()

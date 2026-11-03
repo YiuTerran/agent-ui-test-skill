@@ -63,6 +63,8 @@ Reporter环境变量由runner传入子进程，不打印：
 
 ## 中断恢复与依赖熔断
 
+中断全量批次可能跳过fixture teardown，留下已创建或创建结果unknown的资源；数量按实际账本核实，不等于未完成case数。下一批相关写入会被残留门禁阻断，反复新建run不会消除这些义务。除继续等待原进程外，决定中断时由runner保留收尾入口及证据；真实中断后先按[恢复流程](cleanup.md#执行与恢复)收敛实际资源、落恢复overlay并提交cleanup_state回读索引，再启动相关下一批。明确只读或与残留无交集的任务仍按门禁判断。门禁阻断记为blocked/未执行，不作为业务断言失败。
+
 长CLI在spawn前持久化本次command、真实开始时间、独立输出路径和退出码null，启动后补实际进程标识，退出后再补结束时间与真实退出码；只有结束时才写回执会在宿主中断时丢失边界。使用宿主支持的可恢复会话，需脱离宿主进程组时由项目runner管理租约续期和清理生命周期，不能只后台启动后放弃管理。
 
 先查真实进程。仍在运行则接续等待，不重启。会话句柄丢失、观察等待超时或探测EPERM只表示状态未知，不等于进程已死；核对存活进程及最近产物再决定。进程已退出时先保留原生文件、sidecar和真实退出回执，再摄取完整观察：
@@ -134,6 +136,8 @@ runner在资源创建结果未决或清理失败时，立即调用`checkpoint.py
 ```json
 {"resource_environment":"tenant-dev","kind":"category","id":"70","status":"absence_verified","verified":true}
 ```
+
+这是`evidence`引用文件的顶层dict，必需字段不能包进`resources`数组或索引对象；`id`必须是字符串，`verified`必须是JSON布尔值true，不能用`1`或`"true"`。可增加来源证据字段，但不替代这些匹配字段。外层cleanup_state事件仍用`resources:[...]`；原始API响应单独保存，由项目adapter按[资源恢复契约](cleanup.md#项目资源恢复契约)判断后生成回执，不能手写true代替实际查询。
 
 `retained_verified`还要求事件和回执的`retention`一致且为`pooled/disabled`，保留结果须满足原资源账本及授权要求。回执由runner依据实际absence查询或保留状态回读生成，附相应来源证据；工具核验匹配字段，不代替真实查询。test passed、close.cleanup_verified或普通依赖unblock均不改变此索引。共享owned路径仅关闭已核验的准确ID；专用reset路径须以完整scope absence映射到原残留义务后逐项关闭，scope外或映射不明的同kind残留继续阻断。
 

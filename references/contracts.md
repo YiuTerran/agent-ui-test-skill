@@ -1,6 +1,6 @@
 # 本地工作流CLI与JSON契约
 
-按需查阅：[CLI](#cli)、[Git资产](#git资产)、[事件字段](#record事件)、[状态与统计](#状态与统计)、[辅助脚本](#提速辅助脚本)、[回收](#运行历史回收)、[平台与故障](#平台与故障边界)。最小顺序见[工作流](workflow.md#最小命令顺序)，报告绑定细节见[报告](reports.md)。
+按需查阅：[CLI](#cli)、[Git资产](#git资产)、[事件字段](#record事件)、[cleanup_state回读契约](#checkpoint的cleanup_state与回读证明)、[状态与统计](#状态与统计)、[辅助脚本](#提速辅助脚本)、[回收](#运行历史回收)、[平台与故障](#平台与故障边界)。最小顺序见[工作流](workflow.md#最小命令顺序)，报告绑定细节见[报告](reports.md)。
 
 Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启动Agent、执行产品测试或删除业务数据。除`--help`外输出JSON；成功exit0，输入/占用/门禁失败exit2并含`error`。输入不得含密钥、Cookie、token或原始认证响应；`authref`只存引用，字段过滤不能替代保密责任。
 
@@ -208,6 +208,12 @@ fully_accepted还必须同时满足：
 - 事件只记录主Agent判断，不证明业务语义全覆盖。产品失败可按completed_with_failures结束，不篡改历史结果。
 
 组合入口`attempt-collect`和`finalize`见[本地辅助入口](local-tools.md#确定性批量入口)。前者复用Attempt及collect-results门禁，后者只接受明确的终态决定，连续完成必要离线合并、真实事件登记、报告核验和release；require_full=true时必须完整，fully_accepted的原门禁始终保留。finalize不清理业务资源或假定CLI已退出。正常输出保持精简，完整结果留summary.json；失败保留可恢复状态，不补造证据。
+
+### checkpoint的cleanup_state与回读证明
+
+`cleanup_state`由`checkpoint.py record`接收，用于跨run残留索引，不是`workflow.py record`的resource事件。完整字段、示例、保留及shared_config额外要求统一见[跨run残留门禁](checkpoints.md#跨run残留门禁)，不复制另一份schema。
+
+区分三种文件：事件外层使用`resources:[...]`；其中`evidence`路径指向的匹配回执为扁平顶层dict，含`resource_environment/kind/id/status/verified`；索引是工具生成的持续状态，不能拿索引或原始API响应替代回执。环境、kind、字符串ID和status须匹配，verified须为严格布尔值true；出现`matching resource readback proof required`先核对该文件及类型，再核对真实回读，不能直接改索引解除门禁。项目各kind的身份、app/header及缺席语义见[资源恢复契约](cleanup.md#项目资源恢复契约)。
 
 ## 状态与统计
 

@@ -72,7 +72,8 @@ python3 "$WF" preflight --project "$PROJECT" --run "$RUN" --owner "$OWNER" --inp
 ```json
 {
   "runtime": {
-    "node": "<项目实际Node可执行文件>"
+    "node": "<项目实际Node可执行文件>",
+    "require_node": true
   },
   "sources": [
     {
@@ -97,7 +98,7 @@ python3 "$WF" preflight --project "$PROJECT" --run "$RUN" --owner "$OWNER" --inp
 ```
 
 - 来源观察由连接器或项目既有读取工具提供，preflight只复用source_cache.verify的身份和完整性检查。观察时间不得早于本轮创建或最新resume；新建run的首次预检通常尚无观察，输出observe，随后按现有source流程读取、核验和登记即可，无需再跑一次全量preflight。未提供来源观察时，不推断远端未变
-- runtime仅支持可选`node`和`directory`非空字符串，含义与下述独立探测一致；省略node时明确返回`not_checked`，不能视作Node或Playwright就绪。Python文件操作每次preflight自动检查；doctor仍为只读入口
+- runtime支持可选`node`、`directory`非空字符串及`require_node`严格布尔值（默认false）。执行回归的runner传`require_node:true`及实际node，缺node时返回`node_required`、exit2，不创建或续租run。仅做Python侧准备时可省略node，返回`not_checked`，不能视作Node或Playwright就绪。Python文件操作每次preflight自动检查；doctor仍为只读入口
 - discovery由项目实际Playwright发现命令提供，例如现有授权CLI的`--list --reporter=json`输出；必须为该run范围完整且未过滤的发现清单，实际setup项目名由项目配置明确提供。`complete=true`是执行者声明，脚本无法独立证明发现命令未过滤，仍需审阅实际命令及配置。按完整文件路径和精确标题匹配，多project和repeat目标保留数量
 - 发现结果列出代码/审核缺口、缺失plan、缺失独立test、未映射test及歧义。legacy共享test按(spec,title)归到legacy_shared_tests及关联case_ids，独立化义务保留在code_review_gaps，不重复列作未映射或缺失独立test。未提供发现清单时status=unknown，文件存在不证明独立test存在；已审核有效独立case缺席另列reviewed_missing_tests，阻止把该清单用于全量计划
 - 每次发现status=checked时，以当前missing_tests、legacy成员及静态代码资格重新计算automation_gap_case_ids，并同步刷新待选择清单和next_steps。不同的旧发现摘要及结论保存在discovery_inventory_history，相同输入复用；未提供新发现时保留上次依据
@@ -109,10 +110,13 @@ python3 "$WF" preflight --project "$PROJECT" --run "$RUN" --owner "$OWNER" --inp
 独立入口不要求已有工作流资产，直接回归也可调用：
 
 ```sh
-python3 "$SKILL_DIR/scripts/runtime_probe.py" --project "$PROJECT" --node "$PROJECT_NODE"
+python3 "$SKILL_DIR/scripts/runtime_probe.py" --project "$PROJECT" --node "$PROJECT_NODE" \
+  --require-node --directory "$ATTEMPT_OUTPUT_PARENT"
 ```
 
-`PROJECT_NODE`是已核实的项目Node可执行文件；子进程cwd为PROJECT，不替换包管理器或下载依赖。`--node`可省略，结果仅证明Python侧检查。`--directory`默认为`test/.cache/runtime-probes`，只能是`test/.cache/`内的安全项目相对路径，拒绝穿越、符号链接及reparse祖先。完成Attempt准备后，可把该值设为实际`results/output`路径，在同一解释器、Node和继承环境中复检；runner使用不同cwd或额外目录时仍须在其实际运行上下文验证。
+`PROJECT_NODE`是已核实的项目Node可执行文件，`ATTEMPT_OUTPUT_PARENT`是本次实际产物父目录的项目相对路径；子进程cwd为PROJECT，不替换包管理器或下载依赖。`--require-node`在未传node时返回`node_required`和exit2，避免漏检Node却被当作就绪。仅做Python侧诊断时可同时省略这两个Node参数。`--directory`默认为`test/.cache/runtime-probes`，只能是`test/.cache/`内的安全项目相对路径，拒绝穿越、符号链接及reparse祖先。完成Attempt准备后，在同一解释器、Node和继承环境中复检实际路径；runner使用不同cwd或额外目录时仍须在其实际运行上下文验证。
+
+项目runner将上述检查放在真实CLI spawn之前，非0即停止派发，不捕获错误后继续；Python通过、Node为`not_checked`不能放行Playwright。首次接入以临时目录离线验证“Node缺失/启动失败或产物拒写时不会启动产品CLI”。相同解释器、Node、cwd、继承环境及产物父目录可复用当轮成功探针，任一变化后重检；preflight及attempt-init本身不保证项目runner已接入这道门禁。探针限制之外的产物路径须由runner在实际目录验证，不能换目录冒充通过。
 
 脚本创建缺失父目录，只在新建的独立临时子目录中探测并删除该子目录，不清空已有产物。Python检查同目录重复mkdir、进程锁、独占写、fsync、原子替换及回读；Node检查重复mkdir、`.playwright-artifacts-*`临时目录、独占写、fsync与替换回读。返回`python_runtime.version/executable/minimum_version`及注入变量是否存在，不输出环境变量值，也不改写子进程环境。解释器版本低于3.10时在启动时直接报错，不产生有效探测JSON。
 

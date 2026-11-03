@@ -153,10 +153,14 @@ def preflight(wf, project, args):
     if not diagnostics['valid']:
         return {'valid': False, 'diagnostics': diagnostics, 'run_started': False}
     runtime_input = request.get('runtime', {})
-    wf.check(isinstance(runtime_input, dict) and set(runtime_input) <= {'directory', 'node'},
-             'runtime accepts only directory and node')
-    wf.check(all(isinstance(value, str) and value for value in runtime_input.values()),
+    wf.check(isinstance(runtime_input, dict)
+             and set(runtime_input) <= {'directory', 'node', 'require_node'},
+             'runtime accepts only directory, node and require_node')
+    wf.check(all(isinstance(value, str) and value for key, value in runtime_input.items()
+                 if key != 'require_node'),
              'runtime directory and node must be nonempty strings')
+    wf.check(type(runtime_input.get('require_node', False)) is bool,
+             'runtime require_node must be boolean')
     runtime = sibling('runtime_probe').inspect(project, **runtime_input)
     if not runtime['valid']:
         return {'valid': False, 'diagnostics': diagnostics, 'runtime': runtime, 'run_started': False}

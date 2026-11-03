@@ -168,7 +168,7 @@ class ToolsTest(TestCase):
         self.assertEqual(state_before, self.state())
 
     def test_preflight_checks_requested_node_in_same_environment(self):
-        self.write('preflight.json', {'runtime': {'node': 'project-node'}})
+        self.write('preflight.json', {'runtime': {'node': 'project-node', 'require_node': True}})
 
         def command_result(command, **kwargs):
             if command[0] == 'git':
@@ -182,6 +182,54 @@ class ToolsTest(TestCase):
             result = self.cli('preflight', '--owner', self.owner,
                               '--input', str(self.project / 'preflight.json'))
         self.assertTrue(result['runtime']['checks']['node']['valid'])
+
+    def test_preflight_required_node_missing_never_creates_or_renews_run(self):
+        self.write('preflight.json', {'runtime': {'require_node': True}})
+        with self.ignored():
+            result = self.cli('preflight', '--owner', self.owner,
+                              '--input', str(self.project / 'preflight.json'), fail=True)
+        self.assertFalse(result['run_started'])
+        self.assertEqual('node_required', result['runtime']['checks']['node']['error_type'])
+        self.assertFalse((self.project / 'test/.cache/runs').exists())
+        self.start()
+        state_before = self.state()
+        with self.ignored():
+            self.cli('preflight', '--run', self.run, '--owner', self.owner,
+                     '--input', str(self.project / 'preflight.json'), fail=True)
+        self.assertEqual(state_before, self.state())
+
+    def test_preflight_rejects_non_boolean_require_node(self):
+        for value in ['true', 1, None, []]:
+            with self.subTest(value=value):
+                self.write('preflight.json', {'runtime': {'require_node': value}})
+                with self.ignored():
+                    result = self.cli('preflight', '--owner', self.owner,
+                                      '--input', str(self.project / 'preflight.json'), fail=True)
+                self.assertIn('require_node must be boolean', result['error'])
+                self.assertFalse((self.project / 'test/.cache/runs').exists())
+
+    def test_preflight_required_node_start_failure_never_creates_or_renews_run(self):
+        self.write('preflight.json', {'runtime': {'node': 'project-node', 'require_node': True}})
+
+        def command_result(command, **kwargs):
+            if command[0] == 'git':
+                return wf.subprocess.CompletedProcess(
+                    command, 0, 'test/.cache/\0' if 'check-ignore' in command else '', '')
+            self.assertEqual('project-node', command[0])
+            raise PermissionError()
+
+        with mock.patch.object(wf.subprocess, 'run', side_effect=command_result):
+            result = self.cli('preflight', '--owner', self.owner,
+                              '--input', str(self.project / 'preflight.json'), fail=True)
+        self.assertFalse(result['run_started'])
+        self.assertEqual('PermissionError', result['runtime']['checks']['node']['error_type'])
+        self.assertFalse((self.project / 'test/.cache/runs').exists())
+        self.start()
+        state_before = self.state()
+        with mock.patch.object(wf.subprocess, 'run', side_effect=command_result):
+            self.cli('preflight', '--run', self.run, '--owner', self.owner,
+                     '--input', str(self.project / 'preflight.json'), fail=True)
+        self.assertEqual(state_before, self.state())
 
     def test_preflight_missing_inventory_is_unknown_not_complete_coverage(self):
         self.start()
