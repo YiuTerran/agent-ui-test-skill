@@ -1,14 +1,15 @@
-# Ego-lite + Playwright E2E Skill
+# Auto Test Skill
 
-将需求、真实 Web 页面探索、独立 Playwright 用例和回归证据连起来的 Agent 技能。
-技能名为 `ego-lite-playwright-e2e`，入口是 [SKILL.md](SKILL.md)。
+将需求、页面探索或后端代码阅读、独立 Playwright 用例和回归证据连起来的 Agent 技能。
+技能名为 `auto-test-skill`，入口是 [SKILL.md](SKILL.md)。本分支为 `api`，用于验证统一 UI/API 工作流。
 
-适用于需求驱动的 Web E2E 覆盖补全与回归验收；不用于纯 API/单元测试、一次性页面检查或直接修复业务代码。
+适用于 Web UI 和真实 HTTP API 的覆盖补全与回归验收；不用于单元测试、进程内 MockMvc/TestClient、一次性页面检查或直接修复业务代码。
 
 ## 能力与边界
 
 - 核对需求、计划、coverage 和实际独立测试之间的覆盖缺口。
-- 使用 ego-lite 探索真实页面，再编写与已审核预期对应的 Playwright 测试。
+- UI 使用 ego-lite 探索真实页面；API 阅读需求与后端代码，再通过真实 HTTP 验证。
+- 共享业务用例及来源，前后端 suite 分别维护本地实现、配置、执行和报告；某类通过不代表另一类通过。
 - 以本地 CLI 管理来源快照、审批证据、运行租约、共享配额和资源清理记录。
 - 绑定每次 Playwright CLI 的原始 JSON、blob 和 HTML，核验全轮合并报告，保留失败、重试和未执行结果。
 - 只自动回收安全白名单内的本地产物，不删除业务数据；业务代码修改需另行授权。
@@ -18,7 +19,7 @@
 ## 前置条件
 
 - Python **最低 3.10**；本仓库脚本与单元测试仅依赖标准库，无需 `pip install`。所有辅助命令启动时检查实际解释器，版本过低直接退出并显示版本和路径；同一流程固定使用已验证的解释器，不能只凭 `python3` 命令名判断版本。
-- 执行已有自动化时，目标项目按自身要求具备 Node.js、Playwright、浏览器及必要夹具；直接回归无需 ego-browser 或需求来源读取工具。
+- 执行已有自动化时，目标项目具备 Node.js、项目本地 Playwright 及必要夹具；UI 需要浏览器，纯 API 不需要。直接回归无需 ego-browser 或需求来源读取工具。
 - 新增页面探索默认使用 `ego-browser` 技能及 ego-lite 集成；本仓库不分发该依赖。资料读取工具仅在核验对应来源时需要。
 - 按当前阶段确认需求预期、测试环境、身份权限和 E2E 数据边界；已有回归沿用既有预期。
 
@@ -32,27 +33,33 @@
 以 Codex 默认的用户技能目录为例（已设置 `CODEX_HOME` 时使用其下的 `skills/`）：
 
 ```sh
-git clone https://github.com/YiuTerran/agent-ui-test-skill.git \
-  "$HOME/.codex/skills/ego-lite-playwright-e2e"
+git clone --branch api https://github.com/YiuTerran/agent-ui-test-skill.git \
+  "$HOME/.codex/skills/auto-test-skill"
 ```
 
 其他支持目录式 `SKILL.md` 的 Agent 使用其对应的技能目录；浏览器工具和授权机制仍须在该环境实际验证。
 也可以保留当前 checkout，通过绝对路径引用其中的 `SKILL.md`，避免维护两份源码。
 
-如果当前 Agent 支持安装技能，也可以直接告诉它：**“请从 `https://github.com/YiuTerran/agent-ui-test-skill` 安装 `ego-lite-playwright-e2e`。”**
-安装后可继续询问“这个 skill 怎么用？”，或让 Agent 在目标前端工程目录按首次接入引导开始配置。
+如果当前 Agent 支持安装技能，也可以告诉它：**“请从 `YiuTerran/agent-ui-test-skill` 的 `api` 分支安装 `auto-test-skill`。”**
+安装后可继续询问“这个 skill 怎么用？”，或在目标测试工程目录按首次接入引导配置。
 
 调用示例：
 
 ```text
-使用 $ego-lite-playwright-e2e 检查当前项目的需求覆盖缺口，
+使用 $auto-test-skill 检查当前 UI 项目的需求覆盖缺口，
 先探索缺失场景并提交用例预期供我审核，再补 Playwright 测试并执行回归。
 既有业务数据只读，仅使用已授权的专用 E2E 资源。
 ```
 
+```text
+使用 $auto-test-skill 为当前后端工程建立真实 HTTP API 自动化。
+从需求及相关后端代码梳理用例，复用已有 UI 业务用例；
+先验证一个代表流程及清理，再完成本次指定模块，测试落在本工程 test 目录。
+```
+
 ## 首次接入目标项目
 
-建议在目标**前端工程目录**调用本技能，让Agent按[首次接入引导](references/onboarding.md)识别工程、补齐配置并检查依赖。monorepo沿用实际E2E工作区；纯黑盒项目也可使用独立测试工程。
+UI 通常从前端工程接入，API 通常从后端工程接入，测试放本工程 `test/` 或已有测试工作区。Agent 按[首次接入引导](references/onboarding.md)识别实际配置与 cwd；纯黑盒也可使用独立测试工程。
 
 Agent会复用已有输入，集中补充需求来源、测试环境、身份和数据边界；后端源码可不提供。WPS工具仅在读取相应来源时需要，详见[WPS 365 插件仓库](https://github.com/YiuTerran/dsh-wps365-plugin)。按阶段检查依赖，沿用已有安装授权及宿主审批；人工认证只阻塞相关任务。
 
@@ -61,12 +68,12 @@ Agent会复用已有输入，集中补充需求来源、测试环境、身份和
 以下为 POSIX shell 示例；Windows 使用 `py -3` 和对应的 PowerShell 路径语法。
 
 ```sh
-SKILL_DIR="$HOME/.codex/skills/ego-lite-playwright-e2e"
+SKILL_DIR="$HOME/.codex/skills/auto-test-skill"
 PROJECT="/path/to/target-project"
-python3 "$SKILL_DIR/scripts/workflow.py" init --project "$PROJECT"
+python3 "$SKILL_DIR/scripts/workflow.py" init --project "$PROJECT" --kind api --suite-id backend
 ```
 
-`init` 只补齐缺失的 `test/spec.md` 和 `test/plans/coverage.json`，不自动批准配置、不修改 `.gitignore`。
+带类型的 `init` 创建新 suite 的配置、本地实现清单及业务 catalog；加入已有 catalog 使用 `--catalog-root`。不自动批准配置、不修改 `.gitignore`，不覆盖已有资产。无类型 `init` 保留旧格式补缺兼容；旧 UI 项目先预览迁移，详见[套件、共享用例与迁移](references/suites-and-cases.md)。
 工作流元数据固定在这些文件和 `test/.cache/`；已有测试、fixture、Playwright配置及命令cwd沿用项目布局，以coverage的spec/plan、真实发现及Attempt的cwd绑定，`test/src/`仅为新工程建议。直接回归无需初始化；调度请求的[config_path](references/contracts.md#双预算与就绪任务)可指定项目相对Markdown路径，或显式null跳过无关的test/spec.md，默认仍读取该文件；规范配额账本和残留索引保持同一PROJECT。
 在目标项目中确认配置、固定范围、需求与用例映射，并将 `/test/.cache/` 加入该项目的 `.gitignore`，
 确认缓存无文件进入Git索引后，再写入来源、认证或运行证据。`doctor`同时检查忽略规则和索引状态：
@@ -87,7 +94,7 @@ SKILL.md            技能入口与安全门禁
 references/         工作流、JSON 契约、报告绑定、浏览器与认证
 assets/             配置与 coverage 模板、事件 schema
 scripts/            本地状态、配额、来源缓存、回收与报告核验工具
-scripts/tests/      合成数据单元测试，不访问真实产品或浏览器
+scripts/tests/      合成数据单元测试及可选的临时HTTP服务集成测试，不访问真实产品或浏览器
 .github/workflows/  本地工具的跨平台单元测试配置
 ```
 
@@ -101,7 +108,14 @@ python3 -m unittest discover -s scripts/tests -v
 
 CI 配置覆盖 Linux、macOS、Windows，以及 Python 3.10 和 3.13。
 平台专属测试可能跳过；非 Windows 的通过不能证明 Windows 原生句柄、junction 或进程行为正确。
-CI 仅验证本地工具，不验证 ego-lite、Playwright 版本兼容性、真实登录或产品业务行为。
+CI 默认验证本地工具，不验证 ego-lite、真实登录或产品业务行为。可选的真实 HTTP 集成测试使用本机已有 Playwright，对临时回环服务执行请求，不下载浏览器：
+
+```sh
+AUTO_TEST_PLAYWRIGHT_CLI=/path/to/node_modules/@playwright/test/cli.js \
+  python3 -m unittest discover -s scripts/tests -p test_api_http.py -v
+```
+
+该测试验证 API 执行及证据绑定链；临时服务不代表任何实际产品，未设置运行时的环境会跳过该项。
 
 ## 公开仓库与隐私
 

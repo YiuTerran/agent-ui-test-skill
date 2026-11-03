@@ -1,11 +1,11 @@
 ---
-name: ego-lite-playwright-e2e
-description: Maintain traceable Web E2E coverage with ego-lite and Playwright. Add user-selected coverage, rerun tests, diagnose failures, and deliver reports; repair test tooling as needed. Not for standalone API/unit testing or one-off page inspection.
+name: auto-test-skill
+description: Build and maintain requirement-driven UI and HTTP API automation with Playwright. Share business cases across frontend and backend suites, explore pages or read backend code, run regressions, diagnose failures, recover interrupted work, and deliver evidence-backed reports. Not for unit testing or one-off page inspection.
 ---
 
-# Ego-lite与Playwright E2E
+# UI与API自动化测试
 
-把有效需求、真实页面观察和Playwright证据连起来。先按本轮请求选路径，不把已有回归或按报告修复重新变成新增覆盖项目。
+把有效需求、实现观察和Playwright证据连起来。UI通过ego-lite观察页面，API通过后端代码阅读定位契约，再调用真实HTTP服务验证。先按本轮请求选路径，不把已有回归或按报告修复重新变成新增覆盖项目。
 
 ## 优先理解测试者意图
 
@@ -21,7 +21,9 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 
 ## 何时使用
 
-适用于Web测试覆盖、已有自动化回归、失败诊断、测试维护和报告交付。独立API/单元测试、一次性页面查看及业务修复使用对应工具，不为此初始化本工作流。
+适用于Web UI及真实HTTP API测试覆盖、已有自动化回归、失败诊断、测试维护和报告交付。单元测试、进程内MockMvc/TestClient、一次性页面查看及业务修复使用对应工具，不为此初始化本工作流。
+
+先确认本轮类型及实际测试工程。UI读取[浏览器与认证](references/browser-and-auth.md)，API读取[API自动化](references/api-testing.md)，不同时加载无关专项资料。两者共享业务case、分别维护实现和结果；跨工程复用、类型覆盖要求及旧项目迁移见[测试套件与共享用例](references/suites-and-cases.md)。首版一个工程工作流对应一个suite，每个业务case在该suite内有一个有效实现；不同断言场景拆case，Playwright project/retry/repeat仍保留原生实例。
 
 默认职责是测试、诊断和报告。执行获准测试所必需的测试脚本、框架、fixture、runner和报告工具修复可自主完成，不逐次请求许可；仅包含测试用途且不改变业务行为的代码才属于此范围，不能仅凭目录或文件名判断。修改业务代码、业务配置或部署脚本以修复产品，以及实际部署，均须有用户明确授权；确诊bug、生成工作包或普通“继续测试”不构成这些授权。获准业务修复交由对应开发流程，完成后回到测试；修复授权不包含提交、推送、发布或部署，已有相应明确授权可复用。新增业务场景须有明确覆盖范围，用户在原始请求中已明确指定的范围直接登记并执行，按[授权复用](references/workflow.md#授权复用与自动推进)处理；已批准数据范围内的测试准备和清理沿用原授权。
 
@@ -29,9 +31,9 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 
 首次建立测试体系或用户要求初始化时，读取[首次接入引导](references/onboarding.md)，主动带用户完成准备，不只抛出命令和空模板：
 
-1. 建议在**目标前端工程目录**初始化；先识别实际包、工作区和已有测试，确认路径后用`init`补缺，不覆盖既有资产。
+1. 在**实际测试工程目录**初始化：UI通常为前端工程，API通常为后端工程的测试工作区。先识别实际包、工作区和已有测试；新工程用`init --kind ui/api --suite-id 稳定标识`，旧UI工程按需预览迁移，不覆盖既有资产。
 2. 从工程和已确认上下文推导配置，再集中询问缺项：需求文档地址/文件、测试环境、身份与数据边界、首轮模块；后端代码库路径按需收集，可不提供。真实凭据和受限地址只保存在合适的本地忽略配置中。
-3. 按当前阶段检查实际Python解释器（最低3.10）、项目Node/包管理器、项目本地Playwright与浏览器，并核实[运行前提与兼容性](references/onboarding.md#运行前提与兼容性)；新增页面探索再检查ego-browser技能/ego-lite集成，WPS等资料工具按来源检查。依赖安装和登录沿用已有授权及宿主权限，只有需要用户参与的缺项才交用户。
+3. 按当前阶段检查实际Python解释器（最低3.10）、项目Node/包管理器及项目本地Playwright，并核实[运行前提与兼容性](references/onboarding.md#运行前提与兼容性)。UI再检查浏览器，新增页面探索再检查ego-browser；API检查HTTP环境与认证，后端源码只在本轮设计/诊断需要时读取。WPS等资料工具按来源检查。依赖安装和登录沿用已有授权及宿主权限，只有需要用户参与的缺项才交用户。
 4. 确认Git忽略与配置，读取真实需求，列出需求、候选case和疑点；登记已明确的首轮范围，范围不明时才请用户选择，先验证代表流程及清理，再推进获准目标。
 
 已有回归、来源快检和按报告修复沿用对应快车道，不重复引导。依赖未就绪时可以继续不依赖它的配置与需求整理，明确阻塞点，不把初始化成功当作E2E通过。
@@ -40,7 +42,7 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 
 | 本轮请求 | 默认路径 | 读取范围 |
 | --- | --- | --- |
-| 首次接入、初始化整个测试 | 定位前端工程→收集缺项→检查依赖→梳理需求→选择首轮用例 | [首次接入引导](references/onboarding.md) |
+| 首次接入、初始化整个测试 | 确认UI/API及工程→收集缺项→检查依赖→梳理需求→选择首轮用例 | [首次接入引导](references/onboarding.md) |
 | 新增下一组、补齐覆盖 | 盘点模块缺口→确认新增范围→探索/编码→受影响验证→收尾全量 | [工作流](references/workflow.md#覆盖缺口门禁与模块补全) |
 | 已部署再跑、只回归、不新增、跳过前置直接跑 | 锁定目标→一次发现校验→执行→结果与清理；沿用既有预期 | [确定性任务](references/workflow.md#确定性任务直接完成) |
 | 确认需求是否变更 | 当前来源快检→同口径比较→报告变化或无法确认 | [确定性任务](references/workflow.md#确定性任务直接完成) |
@@ -50,7 +52,7 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 
 ## 执行效率（SHOULD）
 
-**能程序化的流程连续执行到完成，只有不确定性才交回Agent。**Agent参与需求语义澄清、用例设计/审核、真实页面探索、自动化代码编写及bug定位修复，以及必须由用户决定的范围/权限问题。已确定的来源读取与版本比较、发现/差集、状态登记、目录/环境准备、配额领取、CLI、清理核验、结果采集、离线合并、报告和释放均由程序处理。不得用低思考等级Agent逐条代替脚本执行。
+**能程序化的流程连续执行到完成，只有不确定性才交回Agent。**Agent参与需求语义澄清、用例设计/审核、UI页面探索或API后端代码阅读、自动化代码编写及bug定位修复，以及必须由用户决定的范围/权限问题。已确定的来源读取与版本比较、发现/差集、状态登记、目录/环境准备、配额领取、CLI、清理核验、结果采集、离线合并、报告和释放均由程序处理。不得用低思考等级Agent逐条代替脚本执行。
 
 - **一次准备，连续执行**：从现有run/交接/项目runner取已知输入，必要读操作合批。每个连续确定性区间默认一次宿主调用完成；有依赖的动作在同一程序中顺序运行，无冲突的读取并行。长CLI返回会话句柄后接续等待，不在每步之间重新推理或征询。
 - **组合入口优先**：已有真实CLI回执用`attempt-collect`一次生成bundle并采集；全部CLI就绪后用`finalize`一次完成必要原生merge、最终事件、报告核验和释放。已有登记merge直接复用。正常路径不再分开调用对应底层命令；详见[批量入口](references/local-tools.md#确定性批量入口)。
@@ -77,7 +79,7 @@ description: Maintain traceable Web E2E coverage with ego-lite and Playwright. A
 
 1. 确定性任务先走[直接完成路径](references/workflow.md#确定性任务直接完成)；新增覆盖、需求验收或需要工作流绑定时，用一次`preflight`完成接管/续租、本地诊断和已提供来源观察/测试发现的差集汇总；已有run用`--run`，恢复用`--resume`。缺失项按需补齐，不把本地文件存在当作来源新鲜或真实test发现。来源未变且快照完整时复用，不重读正文。仅本地修复不启动run。
 2. 新增覆盖时列出总数、各模块数量和case/缺口原因，复用明确范围；缺少决定时才征询。完整非空清单就绪后登记automation_expansion，已有明确请求可作为user_reply，不为登记再问一次。只回归记录跳过新增；清单不完整标待核实，不阻挡已有测试。
-3. 对获选缺口执行ego-browser探索→独立Playwright测试→受影响验证，同一探索者完成该场景代码。最小代表流程就绪即定向验证，再扩展同类case，见[代表流程](references/workflow.md#覆盖缺口门禁与模块补全)。产品差异保留需求断言。并行按[资源与冲突](references/workflow.md#并行和数据边界must)执行；宿主不支持或不允许子Agent时由主Agent连续完成，单Agent也可运行独立Playwright workers。
+3. 对获选缺口，UI执行ego-browser探索、API执行需求与后端代码阅读，再编写独立Playwright测试并做受影响验证，同一执行者完成该场景代码。最小代表流程就绪即定向验证，再扩展同类case，见[代表流程](references/workflow.md#覆盖缺口门禁与模块补全)。产品差异保留需求断言。并行按[资源与冲突](references/workflow.md#并行和数据边界must)执行；宿主不支持或不允许子Agent时由主Agent连续完成。
 4. 首次回归前只调用一次`prepare-regression`，在项目runner的一次调用内完成`attempt-init`、必要环境检查、领取配额、真实CLI及teardown/释放配额；随后`attempt-collect`从真实回执一次生成并登记绑定。受影响验证标affected；收尾全量标full并绑定当前完整发现清单，核对实际目标集合及所有shard。
 5. 有改动先定向验证，再按本轮范围收尾；稳定且未改代码的已有回归可直接full，不额外跑一轮affected。完整回归验收须当前代码full；定向复测只报告已测范围，不为凑完整验收扩大任务。全部CLI完成后将明确的验收决定交给一次`finalize`，由程序合并本轮Playwright HTML、登记终态、生成失败优先入口、核验并释放run；成功立即交付。相同输入不重复试错。
 
@@ -102,11 +104,11 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 
 - 完整回归核对需求→case→实际独立test；新增场景的探索、测试及所需fixture以明确范围授权和当前清单登记为前置。普通“开始测试/执行全部测试”只授权盘点及已有回归；沉默、超时和历史用例审核均不构成新增授权。明确只回归直接记录跳过新增；定向修复仅核对受影响映射。授权可以是固定case清单，也可以是指定需求/模块内全部缺口，依[授权复用](references/workflow.md#授权复用与自动推进)核实并更新登记；越出原授权才征询。
 - 用户选择跳过或仅新增部分模块时，保留剩余缺口及决定证据，报告区分本轮新增范围、现有自动化执行与需求覆盖。
-- 需求决定预期，浏览器说明实际行为。业务差异保留证据；业务代码修复需另有授权。
+- 需求决定业务预期，页面观察和后端代码帮助理解实现；API仍以真实HTTP请求、响应及必要状态回读验证。代码与需求冲突保留差异，代码派生用例记录位置和版本；业务代码修复需另有授权。
 - 既有业务数据默认只读，共享数据按准确owned证明逆依赖清理；未知创建结果不重试、不猜测删除。用户明确授权整体重置的独占数据域，按获准resource kinds及当前完整盘点执行reset，旧unknown缺逐条receipt不阻挡此恢复路径；保留用户确认的准确保护基线；项目确认的共享/系统数据域禁止reset，不从域名或ID推定隔离性。日常case cleanup与轮末独立scope sweep均实际执行，reset仅凭完整scope absence及实际cleanup_state桥接关闭相关unknown/残留；停源、互斥、分页、依赖及retained规则见[清理与专用域reset](references/cleanup.md)。范围内共享配置按原值恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
 - 清理未决立即通过checkpoint的`cleanup_state`增量登记跨run索引，按稳定环境、kind、准确ID去重，阻断相关写资源包和后续claim；明确只读或无相关资源依赖的case继续。恢复前核对[项目资源恢复契约](references/cleanup.md#项目资源恢复契约)中的身份、应用上下文及逐kind缺席语义，再凭匹配资源的absence/retained_verified回读证据恢复，不以test passed、close或普通unblock解除。报告分别列单轮残留、历史累计和本轮清理数量；错误msg先脱敏，见[跨run残留门禁](references/checkpoints.md#跨run残留门禁)。
 - 所有runner启动产品CLI前必须通过残留门禁：使用checkpoint的重新claim，或调用`checkpoint.py gate`并检查退出码。`workflow attempt-init`本身不读取残留索引，非checkpoint runner必须在pre-dispatch接入gate；未知写scope在已有残留时fail closed，明确readonly可继续。升级脚本、生成工作包或成功attempt-init均不代表已接入。
-- 独立case并行、共享资源按账号/组织/配置/数据冲突组局部串行。执行前领取共享配额，teardown后释放；资源信息不足从一个浏览器任务开始。
+- 独立case并行、共享资源按环境/账号/组织/配置/数据冲突组局部串行。执行前领取共享配额，teardown后释放；资源信息不足从一个任务开始。API worker不自动占浏览器；跨工程共用资源必须配置相同coordination.root及冲突键，目录共享不证明隔离。
 - 工作流新run的`native_merge_required=true`：每个结果bundle必须绑定当前schema的Attempt计划及摘要、原始JSON和blob，正常同时生成HTML；完整绑定Setup、业务case、retry及未执行结果，最终合并全部结果blob并核验。直接执行的原始结果单独交付，不冒充已登记bundle或需求验收。中断产物不齐的调用独立登记仅回执，不计结果或完整性。JSON-only保留为旧run的受限兼容路径。失败、重跑后通过及未执行置前，不以缺失证据推断通过。
 - 新Attempt仅允许追加固定reporter/output参数，执行选择条件进入计划command。新run的完整验收必须满足`regression_completeness=complete`，覆盖绑定完整发现清单的收尾full及全部目标/分片；业务结果另行核验。缺少计划、full或目标时阻止完整验收，`not_declared`仅用于旧run；完整发现声明仍需真实命令审阅。
 - 默认每轮执行前回收相关模块旧报告；跨run续跑先显式保护仍被复用的原生产物，无法完整声明依赖时通过项目配置关闭自动回收，见[断点证据保护](references/checkpoints.md#跨run证据与回收)。只自动删除缓存白名单内安全归属明确的产物，保护当前run、有效审批/baseline及未核清资源恢复证据。回收记录不能改写历史结论。
@@ -126,7 +128,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - `scripts/source_cache.py capture|verify`：新来源导出后留指纹清单，后续有新观察时校验复用
 - `scripts/retention.py plan|apply`：手动预览/恢复；日常回归已由prepare-regression组合调用
 
-脚本处理本地状态、配额、来源缓存、安全回收和报告核验，finalize还可执行本地Playwright离线合并，不启动Agent或执行产品测试，不读取远端来源。入口为`python3 <skill>/scripts/workflow.py`（Windows用`py -3`）。`init`只补缺；`doctor`只读诊断；`schema`查看输入字段。`record`/`collect-results`默认简报，`--full`按需展开；最终验收/报告仍完整核验。
+脚本处理本地状态、配额、来源缓存、安全回收和报告核验，finalize还可执行本地Playwright离线合并，不启动Agent或执行产品测试，不读取远端来源。入口为`python3 <skill>/scripts/workflow.py`（Windows用`py -3`）。无类型`init`兼容补缺，带`--kind`的新suite初始化要求工作流资产不存在；已有UI资产用`migrate`。`doctor`只读诊断；`schema`查看输入字段。`record`/`collect-results`默认简报，`--full`按需展开；最终验收/报告仍完整核验。
 
 工作流元数据固定使用`test/spec.md`、`test/plans/coverage.json`和Git忽略的`test/.cache/`；`test/src/`只是新工程建议。已有测试、fixture、Playwright配置和命令cwd沿用项目布局，通过coverage的spec/plan、真实发现及Attempt的cwd绑定，不能为了接入搬迁代码。直接回归不要求初始化这些资产；调度配置与既有`test/spec.md`冲突时使用[config_path](references/contracts.md#双预算与就绪任务)，共享配额和残留索引仍使用同一PROJECT。
 

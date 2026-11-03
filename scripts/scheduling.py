@@ -19,6 +19,7 @@ import tempfile
 
 GIB = 1024 ** 3
 BROWSER_BYTES = 2 * GIB
+API_WORKER_BYTES = GIB // 4
 RESERVE_BYTES = 2 * GIB
 QUOTAS = ('agents', 'exploration_browsers', 'playwright_workers', 'browsers')
 DONE = {'approved', 'complete', 'completed', 'succeeded'}
@@ -35,6 +36,31 @@ _PLATFORM_SPEC = importlib.util.spec_from_file_location(
     'e2e_scheduling_platform_support', Path(__file__).resolve().with_name('platform_support.py'))
 platform_support = importlib.util.module_from_spec(_PLATFORM_SPEC)
 _PLATFORM_SPEC.loader.exec_module(platform_support)
+
+_CATALOG_SPEC = importlib.util.spec_from_file_location(
+    'auto_test_scheduling_catalog', Path(__file__).with_name('suite_catalog.py'))
+suite_catalog = importlib.util.module_from_spec(_CATALOG_SPEC)
+_CATALOG_SPEC.loader.exec_module(suite_catalog)
+
+
+def request_kind(project, data):
+    kind = data.get('test_kind')
+    if kind is None:
+        path = data.get('config_path', 'test/spec.md')
+        spec = {}
+        if path is not None:
+            platform_support.relative_parts(path)
+            target = project / path
+            if target.exists():
+                check(target.resolve().is_relative_to(project), 'scheduling config outside project')
+                blocks = re.findall(r'```json workflow-config\s*\n(.*?)\n```',
+                                    target.read_text(encoding='utf-8'), re.S)
+                check(len(blocks) == 1, 'configuration requires one workflow-config block')
+                spec = json.loads(blocks[0])
+                check(isinstance(spec, dict), 'workflow-config must be an object')
+        kind = suite_catalog.suite(spec)['kind']
+    check(kind in {'ui', 'api'}, 'test_kind must be ui or api')
+    return kind
 
 
 class MemoryStatusEx(ctypes.Structure):
@@ -130,7 +156,7 @@ def configuration(project, overrides, config_path='test/spec.md'):
         sources[key] = 'input' if key in overrides else ('spec' if key in configured else 'default')
         if key == 'max_parallel_agents' and values[key] == 'auto':
             continue
-        integer(values[key], key, 1)
+        integer(values[key], key, 0 if key == 'browser_parallel_cap' else 1)
     return values, sources
 
 
@@ -270,15 +296,18 @@ def budget(project, data, ledger, independent=None):
     slots = facts['available_agent_slots']
     slots = 1 if slots is None else slots
     lanes = facts['independent_tasks']
-    agent_lanes, browser_lanes = independent if independent is not None else (1, 1)
+    agent_lanes, browser_lanes = independent[:2] if independent is not None else (1, 1)
     if lanes is not None:
         agent_lanes, browser_lanes = min(agent_lanes, lanes), min(browser_lanes, lanes)
         if independent is None:
             agent_lanes = browser_lanes = lanes
     memory = facts['available_memory_bytes']
+    active_api_workers = sum(lease['quota']['playwright_workers'] for lease in ledger['leases'].values()
+                             if lease['status'] == 'active' and lease['task'].get('test_kind', 'ui') == 'api')
     # Reservations may not have materialized as processes yet. Charge all active
     # reservations conservatively; repeated snapshots must not mint capacity.
-    memory_cap = max(0, (memory - RESERVE_BYTES) // BROWSER_BYTES) if memory is not None else 1
+    memory_cap = (max(0, (memory - RESERVE_BYTES - active_api_workers * API_WORKER_BYTES) // BROWSER_BYTES)
+                  if memory is not None else max(0, 1 - active_api_workers))
     limits = {
         'agents': {'requested': requested_agents, 'cpu': cpu_agents,
                    'slots': active['agents'] + slots, 'independent_tasks': active['agents'] + agent_lanes},
@@ -290,6 +319,16 @@ def budget(project, data, ledger, independent=None):
         limits['browsers']['unknown_cpu'] = 1
     effective = {key: min(values.values()) for key, values in limits.items()}
     effective['playwright_workers'] = min(config['playwright_workers'], effective['browsers'])
+    task_values = data.get('tasks', {})
+    task_values = task_values.values() if isinstance(task_values, dict) else task_values
+    api_workers = request_kind(project, data) == 'api' or any(
+        isinstance(task, dict) and task.get('test_kind') == 'api' for task in task_values)
+    if api_workers:
+        worker_memory = max(0, (memory - RESERVE_BYTES - active['browsers'] * BROWSER_BYTES)
+                            // API_WORKER_BYTES) if memory is not None else max(0, 1 - active['browsers'])
+        worker_memory += active['playwright_workers'] - active_api_workers
+        effective['playwright_workers'] = min(config['playwright_workers'],
+                                               cpu_browsers, worker_memory)
     if facts['pressure']:
         effective = dict.fromkeys(effective, 0)
     available = {key: max(0, value - active[key]) for key, value in effective.items()}
@@ -299,11 +338,12 @@ def budget(project, data, ledger, independent=None):
             'effective': effective, 'available': available, 'limits': limits,
             'resource_facts': facts, 'resource_sources': fact_sources,
             'admission_paused': facts['pressure'], 'existing_leases_revoked': False,
-            'planning_estimate': {'bytes_per_browser': BROWSER_BYTES, 'reserve_bytes': RESERVE_BYTES,
+            'planning_estimate': {'bytes_per_browser': BROWSER_BYTES, 'bytes_per_api_worker': API_WORKER_BYTES,
+                                  'reserve_bytes': RESERVE_BYTES,
                                   'basis': 'estimate_not_measurement'}, 'quota': quota_view(ledger)}
 
 
-def normalize_task(project, task_id, task):
+def normalize_task(project, task_id, task, default_kind='ui'):
     check(isinstance(task, dict), 'task must be an object')
     identifier(task_id, 'task_id')
     check(task.get('task_id', task_id) == task_id, 'task key and task_id differ')
@@ -338,12 +378,17 @@ def normalize_task(project, task_id, task):
         groups += ['case:' + cid for cid in result['case_ids']]
     result['isolation_groups'] = groups or ['unscoped']
     phase = task.get('phase')
-    default = {'agents': 1, 'exploration_browsers': int(phase == 'exploration'),
+    kind = task.get('test_kind', default_kind)
+    check(kind in {'ui', 'api'}, 'task test_kind must be ui or api')
+    if kind == 'api' or 'test_kind' in task:
+        result['test_kind'] = kind
+    default = {'agents': 1, 'exploration_browsers': int(phase == 'exploration' and kind == 'ui'),
                'playwright_workers': int(phase == 'execution')}
     units = task.get('quota', default)
     check(isinstance(units, dict) and not (set(units) - set(default)), 'invalid task quota fields')
     result['quota'] = {key: integer(units.get(key, 0), key) for key in default}
-    result['quota']['browsers'] = result['quota']['exploration_browsers'] + result['quota']['playwright_workers']
+    result['quota']['browsers'] = (result['quota']['exploration_browsers']
+                                  + (result['quota']['playwright_workers'] if kind == 'ui' else 0))
     check(any(result['quota'].values()), 'task must reserve at least one resource')
     result['status'] = task.get('status', 'pending')
     check(isinstance(result['status'], str), 'status must be a string')
@@ -359,7 +404,8 @@ def tasks_from_input(project, data):
         check(len({k for k, _ in pairs}) == len(pairs), 'duplicate task_id')
     else:
         pairs = list(raw.items())
-    return {key: normalize_task(project, key, task) for key, task in pairs}
+    kind = request_kind(project, data)
+    return {key: normalize_task(project, key, task, kind) for key, task in pairs}
 
 
 def conflicts(left, right):
@@ -472,13 +518,19 @@ def atomic_json(path, value):
 
 @contextmanager
 def locked_ledger(project):
-    directory = project
+    try:
+        root = suite_catalog.bind_coordination(project)
+    except ValueError as error:
+        if str(error) == 'shared directory escapes configured root':
+            raise ValueError('scheduling directory escapes project') from error
+        raise
+    directory = root
     for name in ('test', '.cache', 'scheduling'):
         directory = directory / name
         platform_support.ensure_directory(directory)
         # Resolving missing Windows paths can retain \\?\ when another process
         # creates a parent mid-resolution. Check each existing component instead.
-        check(directory.resolve(strict=True).is_relative_to(project),
+        check(directory.resolve(strict=True).is_relative_to(root),
               'scheduling directory escapes project')
     # Keep the lock inode stable; only the separate JSON file is replaced.
     with (directory / 'quota.lock').open('a') as stream:
@@ -506,6 +558,8 @@ def acquisition(project, data, ledger):
     signature = hashlib.sha256(json.dumps([run_id, signature_task, owner, pid, host], sort_keys=True).encode()).hexdigest()
     for lease in ledger['leases'].values():
         if lease['status'] == 'active' and lease['run_id'] == run_id and lease['task']['task_id'] == tid:
+            check(lease.get('project', str(project)) == str(project),
+                  'run/task identity already reserved by another project; use distinct run IDs')
             check(lease['signature'] == signature, 'active task reservation differs; release it before changing')
             return {'acquired': True, 'idempotent': True, 'lease': lease, 'budget': result}, False
     reasons = eligibility(task, tasks, occupied, run_id) + capacity_reasons(task, result['available'])
@@ -513,6 +567,7 @@ def acquisition(project, data, ledger):
         return {'acquired': False, 'reasons': reasons, 'budget': result}, False
     lid = secrets.token_hex(16)
     lease = {'lease_id': lid, 'release_token': secrets.token_hex(24), 'run_id': run_id,
+             'project': str(project),
              'task': task, 'owner': owner, 'owner_pid': pid, 'host': host,
              'quota': task['quota'], 'status': 'active', 'created_at': timestamp(), 'signature': signature}
     ledger['leases'][lid] = lease
@@ -574,6 +629,8 @@ def pid_state(pid):
 def terminal_evidence(project, lease):
     # Trust only the canonical workflow task record, never a caller's boolean,
     # lease age, run acceptance, or an arbitrary evidence path.
+    if lease.get('project', str(project)) != str(project):
+        return None
     path = project / 'test/.cache/runs' / lease['run_id'] / 'state.json'
     try:
         check(path.resolve().is_relative_to(project), 'terminal evidence escapes project')

@@ -28,6 +28,11 @@ _retention_spec = importlib.util.spec_from_file_location('e2e_retention', Path(_
 retention = importlib.util.module_from_spec(_retention_spec)
 _retention_spec.loader.exec_module(retention)
 
+_catalog_spec = importlib.util.spec_from_file_location(
+    'auto_test_suite_catalog', Path(__file__).with_name('suite_catalog.py'))
+suite_catalog = importlib.util.module_from_spec(_catalog_spec)
+_catalog_spec.loader.exec_module(suite_catalog)
+
 SCHEMA = 1
 LEASE_SECONDS = platform_support.DEFAULT_RUN_LEASE_SECONDS
 TERMINAL = {'fully_accepted', 'completed_with_failures', 'partially_blocked', 'aborted'}
@@ -116,12 +121,16 @@ def no_secrets(value):
 
 
 @contextmanager
-def project_lock(project):
-    directory = project / 'test/.cache'
-    platform_support.ensure_directory(directory, parents=True)
+def project_lock(project, shared=True):
+    directory = suite_catalog.ensure_child_directory(project, 'test/.cache')
+    safe_path(project, 'test/.cache/workflow.lock')
     with (directory / 'workflow.lock').open('a+b') as stream:
         with platform_support.file_lock(stream.fileno()):
-            yield
+            if shared:
+                with suite_catalog.shared_locks(project):
+                    yield
+            else:
+                yield
 
 
 def parse_spec(path):
@@ -135,16 +144,20 @@ def assets(project):
     try:
         spec, cov = parse_spec(project / 'test/spec.md'), load(project / 'test/plans/coverage.json')
         check(isinstance(spec, dict) and isinstance(cov, dict), 'asset roots must be objects')
-        return spec, cov
+        journal_path = project / 'test/.cache/catalog-update.json'
+        check(not journal_path.exists() or load(journal_path).get('complete') is True,
+              'pending catalog update; use catalog-recover before continuing')
+        return spec, suite_catalog.project_view(project, spec, cov)
     except FileNotFoundError as error:
         raise ValueError('missing workflow assets; run workflow.py init --project "' + str(project)
                          + '" first, then fill confirmed configuration; use doctor for details') from error
     except (ValueError, UnicodeError) as error:
         raise ValueError('invalid workflow assets; run workflow.py doctor --project "' + str(project)
-                         + '" and repair the indicated configuration') from error
+                         + '" and repair the indicated configuration: ' + str(error)) from error
 
 
 def config_missing(spec):
+    suite_catalog.suite(spec)
     missing = []
     for key in ['env', 'authref', 'data-policy', 'commands']:
         if not spec.get(key):
@@ -177,7 +190,7 @@ def asset_errors(project, spec, cov):
             errors.append('unknown requirement source: ' + rid)
         if req.get('scope') not in cov.get('scopes', []) or req.get('expected_version') is None:
             errors.append('requirement scope or expected_version missing: ' + rid)
-        if not req.get('case_ids') and req.get('status') != 'retired':
+        if not req.get('case_ids') and req.get('status') != 'retired' and not req.get('kind_not_required'):
             errors.append('requirement has no case mapping: ' + rid)
         for cid in req.get('case_ids', []):
             if cid not in cov.get('cases', {}) or rid not in cov['cases'][cid].get('requirement_ids', []) or (req.get('status') != 'retired' and cov['cases'][cid].get('implementation') == 'retired'):
@@ -198,7 +211,8 @@ def asset_errors(project, spec, cov):
         for field in ['plan', 'spec']:
             if case.get(field):
                 try:
-                    safe_path(project, case[field])
+                    (suite_catalog.asset_path(project, cov, case[field]) if field == 'plan'
+                     else safe_path(project, case[field]))
                 except ValueError as error:
                     errors.append(str(error))
     return errors
@@ -254,9 +268,11 @@ def coverage_reasons(project, cov, cid, context=None):
             reasons.append('missing_' + field + '_path')
         else:
             try:
-                if value not in files:
-                    files[value] = safe_path(project, value).is_file()
-                if not files[value]:
+                key = (field, value)
+                if key not in files:
+                    files[key] = (suite_catalog.asset_path(project, cov, value) if field == 'plan'
+                                  else safe_path(project, value)).is_file()
+                if not files[key]:
                     reasons.append('missing_' + field + '_file:' + value)
             except ValueError:
                 reasons.append('unsafe_' + field + '_path')
@@ -465,13 +481,17 @@ def residual_action(resource):
 
 
 def pool_ledger(project):
-    path = safe_path(project, POOL_LEDGER)
+    path = pool_ledger_path(project)
     if not path.exists():
         return {'schema_version': 1, 'pools': {}}
     ledger = load(path)
     check(isinstance(ledger, dict) and ledger.get('schema_version') == 1 and isinstance(ledger.get('pools'), dict),
           'invalid identity pool ledger: ' + POOL_LEDGER)
     return ledger
+
+
+def pool_ledger_path(project):
+    return suite_catalog.coordination_path(project, POOL_LEDGER)
 
 
 def pool_config(spec, name):
@@ -482,6 +502,13 @@ def pool_config(spec, name):
           and type(value.get('max_accounts')) is int and value['max_accounts'] > 0,
           'identity pool needs identity_pools.<name>.max_accounts > 0 in spec: ' + str(name))
     return value
+
+
+def check_pool_limit(project, spec, name):
+    limit = pool_config(spec, name)['max_accounts']
+    pool = pool_ledger(project)['pools'].get(name, {})
+    check(pool.get('max_accounts', limit) == limit, 'shared pool max_accounts mismatch')
+    return limit
 
 
 def pool_resources(project, state, current_only=False):
@@ -509,10 +536,13 @@ def pool_occupancy(project, state, name):
     """Accounts count toward max_accounts until deleted, including disabled and quarantined ones."""
     accounts = pool_ledger(project)['pools'].get(name, {}).get('accounts', {})
     registered = {tuple(account['origin']) for account in accounts.values()}
-    pending = sum(1 for key, resource in pool_resources(project, state).items()
-                  if resource['pool'] == name and key not in registered
-                  and resource['status'] in UNRESOLVED_RESOURCES | {'retained_verified'})
-    return len(accounts) + pending
+    pending = {key for key, resource in pool_resources(project, state).items()
+               if resource['pool'] == name and key not in registered
+               and resource['status'] in UNRESOLVED_RESOURCES | {'retained_verified'}}
+    shared = pool_ledger(project).get('intents', {})
+    pending.update(tuple(value['origin']) for value in shared.values()
+                   if value['pool'] == name and tuple(value['origin']) not in registered)
+    return len(accounts) + len(pending)
 
 
 def sync_pool_ledger(project, state, current_only=False):
@@ -527,11 +557,12 @@ def sync_pool_ledger(project, state, current_only=False):
             continue
         accounts[resource['pool_ref']] = {
             'pool_ref': resource['pool_ref'], 'status': 'available' if resource['retention'] == 'pooled' else 'disabled',
-            'origin': list(key), 'baseline_evidence': resource.get('evidence', []), 'updated_at': now(),
+            'origin': list(key), 'origin_project': str(project),
+            'baseline_evidence': resource.get('evidence', []), 'updated_at': now(),
             'history': [{'at': now(), 'action': 'registered', 'retention': resource['retention']}]}
         changed = True
     if changed:
-        atomic(safe_path(project, POOL_LEDGER), ledger)
+        atomic(pool_ledger_path(project), ledger)
     return ledger
 
 
@@ -540,6 +571,30 @@ def sync_recorded_pools(project, state, events):
     if any(event.get('type') == 'resource' and event.get('status') == 'retained_verified'
            and state['resources'].get(event.get('resource_id'), {}).get('pool') for event in events):
         sync_pool_ledger(project, state, current_only=True)
+    if any(
+            event.get('type') == 'resource' and state['resources'].get(
+                event.get('resource_id'), {}).get('pool') for event in events):
+        ledger = pool_ledger(project)
+        intents = ledger.setdefault('intents', {})
+        spec = parse_spec(project / 'test/spec.md')
+        for resource_id, resource in state['resources'].items():
+            if not resource.get('pool'):
+                continue
+            origin = [resource.get('created_by_run', state['run_id']),
+                      resource.get('origin_resource_id', resource_id)]
+            key = fingerprint(origin)
+            pool = ledger['pools'].setdefault(resource['pool'], {'accounts': {}})
+            limit = pool_config(spec, resource['pool'])['max_accounts']
+            check(pool.get('max_accounts', limit) == limit, 'shared pool max_accounts mismatch')
+            pool['max_accounts'] = limit
+            if resource['status'] in UNRESOLVED_RESOURCES:
+                prior = intents.get(key)
+                check(not prior or prior.get('origin_project', str(project)) == str(project),
+                      'shared identity intent collision')
+                intents[key] = {'pool': resource['pool'], 'origin': origin, 'origin_project': str(project)}
+            else:
+                intents.pop(key, None)
+        atomic(pool_ledger_path(project), ledger)
 
 
 def pool_run_accounts(project, run_id):
@@ -671,7 +726,8 @@ def status(project, state, spec, cov, full=True, include_history=True):
     global_resources = global_residuals(project, state) if include_history else []
     missing = config_missing(spec)
     unmapped = [rid for rid, req in cov.get('requirements', {}).items() if req.get('scope') in state['scopes']
-                and req.get('status') != 'retired' and (not req.get('case_ids') or any(cid not in selected for cid in req.get('case_ids', [])))]
+                and req.get('status') != 'retired' and not req.get('kind_not_required')
+                and (not req.get('case_ids') or any(cid not in selected for cid in req.get('case_ids', [])))]
     planning = [scope for scope in state['scopes'] if not any(r.get('scope') == scope for r in cov.get('requirements', {}).values())]
     steps = []
     if config_drift and state['acceptance'] not in TERMINAL:
@@ -731,7 +787,7 @@ def status(project, state, spec, cov, full=True, include_history=True):
             reasons.extend(coverage_reasons(project, cov, cid, context))
         inventory[cid] = {'spec': case['spec'], 'title': case.get('title'),
                           'ready': cid in ready_set, 'blocked_by': reasons}
-    result = {'regression_inventory': inventory,
+    result = {'suite': suite_catalog.suite(spec), 'regression_inventory': inventory,
             'configuration_drift': config_drift,
             'regression_policy': spec.get('regression', {}).get('final', 'all_existing_automation'),
             'run_id': state['run_id'], 'freshness_marker': state['freshness_marker'], 'acceptance': state['acceptance'], 'claim': state.get('claim'),
@@ -747,7 +803,7 @@ def status(project, state, spec, cov, full=True, include_history=True):
                         'executions': len(state['executions'])}
     if full:
         return result
-    keys = ['run_id', 'freshness_marker', 'claim', 'acceptance', 'counts', 'blocked_cases',
+    keys = ['suite', 'run_id', 'freshness_marker', 'claim', 'acceptance', 'counts', 'blocked_cases',
             'regression_ready', 'work_needed', 'work_needed_reasons', 'next_steps',
             'missing_configuration', 'configuration_drift', 'coverage_asset_drift',
             'global_residuals_checked', 'automation_expansion']
@@ -833,7 +889,7 @@ def record_event(project, state, spec, cov, event, context=None):
             check(isinstance(event.get('business_change'), bool), 'changed requires explicit business_change')
             check(event.get('observed_revision') or event.get('observed_fingerprint'), 'changed requires observed version')
         if 'requirement_delta' in event:
-            check(event.get('baseline_available') and baseline.get('baseline_path') and safe_path(project, baseline['baseline_path']).is_file(), 'requirement delta requires actual old baseline text')
+            check(event.get('baseline_available') and baseline.get('baseline_path') and suite_catalog.asset_path(project, cov, baseline['baseline_path']).is_file(), 'requirement delta requires actual old baseline text')
             check(all(isinstance(event['requirement_delta'].get(k), int) and event['requirement_delta'][k] >= 0 for k in ['added', 'updated', 'retired']), 'invalid requirement delta')
         if event['status'] in {'changed', 'unchanged'}:
             check(event.get('evidence'), 'readable source check requires evidence')
@@ -960,7 +1016,7 @@ def record_event(project, state, spec, cov, event, context=None):
         check(not any(human_pending(h) and any(human_applies(h, cid, sid) for cid in (target_cases or [None])) for h in state['humans'].values()), 'pending human decision blocks baseline')
         check(event.get('revision') == src.get('observed_revision') and event.get('fingerprint') == src.get('observed_fingerprint'), 'baseline must match observed version')
         if event.get('baseline_path'):
-            check(safe_path(project, event['baseline_path']).is_file(), 'baseline file missing')
+            check(suite_catalog.asset_path(project, cov, event['baseline_path']).is_file(), 'baseline file missing')
         cov['sources'][sid].update({key: event.get(key) for key in ['revision', 'fingerprint', 'baseline_path']})
     elif kind == 'resource':
         rid, value = event['resource_id'], event['status']
@@ -991,8 +1047,12 @@ def record_event(project, state, spec, cov, event, context=None):
         if prior:
             check(stored.get('pool') == prior.get('pool'), 'resource pool is fixed at intent')
         elif event.get('pool') is not None:
-            limit = pool_config(spec, event['pool'])['max_accounts']
+            limit = check_pool_limit(project, spec, event['pool'])
             used = pool_occupancy(project, state, event['pool'])
+            origin = [state['run_id'], rid]
+            pending = pool_ledger(project).get('intents', {}).get(fingerprint(origin))
+            if pending and pending.get('origin_project') == str(project) and pending.get('pool') == event['pool']:
+                used -= 1
             check(used < limit, 'identity pool ' + event['pool'] + ' is full: ' + str(used) + '/' + str(limit)
                   + ' accounts including disabled and quarantined; reuse or resolve instead of creating')
         if value == 'retained_verified' and stored.get('pool'):
@@ -1043,6 +1103,15 @@ def record_event(project, state, spec, cov, event, context=None):
             ids = set(event.get('case_ids', []))
             state['delegation_blocks'] = [item for item in state['delegation_blocks'] if set(item.get('case_ids', [])) != ids]
     elif kind == 'execution':
+        if isinstance(cov, suite_catalog.Coverage) and not event.get('setup'):
+            ids = event.get('case_ids', [])
+            check(isinstance(ids, list) and all(isinstance(cid, str) and cid in cov['cases'] for cid in ids),
+                  'execution case_ids must reference current suite cases')
+            identities = [cov['cases'][cid]['implementation_id'] for cid in ids]
+            check(event.get('implementation_ids', identities) == identities, 'execution implementation identity mismatch')
+            check(event.get('suite', suite_catalog.suite(spec)) == suite_catalog.suite(spec),
+                  'execution belongs to another suite')
+            event.update(implementation_ids=identities, suite=suite_catalog.suite(spec))
         eid = event['execution_id']
         check(eid not in {item['execution_id'] for item in state['executions']}, 'duplicate execution ID')
         check(event.get('result') in RESULTS and event.get('test_id'), 'invalid execution result or test ID')
@@ -1335,6 +1404,8 @@ def failure_markdown(state, cov, project, recycled_paths=None):
 
 
 def summary(project, state, spec, cov, recycled_paths=None):
+    check(state.get('suite', {'id': 'default-ui', 'kind': 'ui'}) == suite_catalog.suite(spec),
+          'run belongs to another suite; retain its original reports instead of relabeling history')
     generated = now()
     if recycled_paths is None:
         recycled_paths = report_recycled_paths(project, state)
@@ -1383,6 +1454,7 @@ def summary(project, state, spec, cov, recycled_paths=None):
         value['resource_ids'] = [rid for rid, r in state['resources'].items() if cid in r.get('case_ids', [])]
         value['phase_records'] = [p for p in state['phase_times'] if cid in p.get('case_ids', []) or cid in state['tasks'].get(p.get('task_id'), {}).get('case_ids', [])]
     return {'schema_version': SCHEMA, 'run_id': state['run_id'], 'generated_at': generated,
+            'coverage_layers': suite_catalog.report_view(cov, results),
             'counts': counts, 'cases': cases, 'issues': state['issues'], 'resources': state['resources'],
             'source_observations': state['source_checks'],
             'automation_expansion': expansion_view(project, state, cov),
@@ -1410,12 +1482,22 @@ def summary(project, state, spec, cov, recycled_paths=None):
             'limits': ['File existence and state constraints do not prove semantic coverage.', 'Missing host usage remains null; no historical counts are inferred.']}
 
 
-def initialize(project):
+def initialize(project, args=None):
     specpath, covpath = project / 'test/spec.md', project / 'test/plans/coverage.json'
     root = Path(__file__).resolve().parent.parent
     spec_text = (root / 'assets/spec.template.md').read_text(encoding='utf-8')
     spec = parse_spec(root / 'assets/spec.template.md')
     cov = load(root / 'assets/coverage.template.json')
+    catalog_asset = None
+    if args is not None and args.kind:
+        check(not specpath.exists() and not covpath.exists(),
+              'suite initialization requires missing workflow assets; use migrate for existing UI assets')
+        spec, cov, catalog_asset = suite_catalog.initialize(project, spec, args.kind,
+                                                            args.suite_id or args.kind,
+                                                            args.catalog_root or '.', atomic)
+        spec_text = spec_text.replace(
+            re.search(r'```json workflow-config\s*\n(.*?)\n```', spec_text, re.S).group(1),
+            json.dumps(spec, ensure_ascii=False, indent=2))
     files = []
     commands = {}
     for name in ['package.json', 'playwright.config.ts', 'playwright.config.js', 'pyproject.toml', 'pom.xml', 'test/package.json', 'test/playwright.config.ts']:
@@ -1435,13 +1517,63 @@ def initialize(project):
         else:
             atomic(path, data, exclusive=True)
             created.append(relative)
+    if catalog_asset and Path(catalog_asset['root']) == project:
+        (created if catalog_asset['created'] else preserved).append(catalog_asset['path'])
     try:
         spec = parse_spec(specpath)
         missing = config_missing(spec)
     except (ValueError, OSError):
         missing = ['spec.workflow-config']
-    return {'created': created, 'preserved': preserved, 'discovered_files': files,
-            'discovered_commands': commands, 'missing_configuration': missing}
+    result = {'created': created, 'preserved': preserved, 'discovered_files': files,
+              'discovered_commands': commands, 'missing_configuration': missing}
+    if catalog_asset:
+        result['catalog_asset'] = catalog_asset
+    return result
+
+
+def migrate(project, args):
+    spec_path = project / 'test/spec.md'
+    spec, legacy = parse_spec(spec_path), load(project / 'test/plans/coverage.json')
+    preview = suite_catalog.migration(project, spec, legacy, args.kind or 'ui',
+                                      args.suite_id or 'ui', args.catalog_root or '.')
+    active = [load(path) for path in (project / 'test/.cache/runs').glob('*/state.json')]
+    check(not any(state.get('acceptance') not in TERMINAL for state in active),
+          'finish or explicitly end unfinished runs before migration')
+    quota_path = suite_catalog.coordination_path(project, 'test/.cache/scheduling/quota.json')
+    check(not quota_path.exists() or not any(
+        item.get('status') == 'active' for item in load(quota_path).get('leases', {}).values()),
+        'release scheduling reservations before migration')
+    if not args.apply:
+        return dict(preview, applied=False)
+    check(args.input, 'migration --apply requires --input with the reviewed preview')
+    check(load(Path(args.input)) == dict(preview, applied=False),
+          'migration preview differs from current assets or options; generate a fresh preview')
+    text = spec_path.read_text(encoding='utf-8')
+    new_text = re.sub(r'(```json workflow-config\s*\n).*?(\n```)',
+                      lambda match: match[1] + json.dumps(preview['spec'], ensure_ascii=False, indent=2) + match[2],
+                      text, count=1, flags=re.S)
+    module_spec = importlib.util.spec_from_file_location('migration_scheduling', Path(__file__).with_name('scheduling.py'))
+    scheduling = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(scheduling)
+    with suite_catalog.directory_lock(project, 'catalog.lock'), scheduling.locked_ledger(project) as (ledger, _):
+        check(not any(item.get('status') == 'active' for item in ledger['leases'].values()),
+              'release scheduling reservations before migration')
+        target = suite_catalog.catalog_path(project)
+        check(not target.exists(), 'migration refuses to overwrite an existing catalog')
+        journal_path = project / 'test/.cache/catalog-update.json'
+        check(not journal_path.exists() or load(journal_path).get('complete') is True,
+              'pending catalog update; use catalog-recover')
+        journal = {'schema_version': 1, 'root': str(project), 'before_catalog': None,
+                   'before_local': suite_catalog.digest(legacy), 'catalog': preview['catalog'],
+                   'coverage': preview['coverage'], 'before_spec_text': text, 'spec_text': new_text,
+                   'spec': preview['spec'], 'complete': False}
+        atomic(journal_path, journal)
+        atomic(target, preview['catalog'], exclusive=True)
+        atomic(project / 'test/plans/coverage.json', preview['coverage'])
+        atomic(spec_path, new_text)
+        atomic(journal_path, dict(journal, complete=True))
+    return {'valid': True, 'applied': True, 'business_cases': preview['business_cases'],
+            'implementations': preview['implementations']}
 
 
 def start(project, args, spec, cov, full=True):
@@ -1471,7 +1603,7 @@ def start(project, args, spec, cov, full=True):
                     overlapping.append(state['run_id'])
         if args.new_round:
             check(not overlapping, 'overlapping unfinished runs require explicit completion or resume before changing scopes: ' + ','.join(overlapping))
-            quota_path = safe_path(project, 'test/.cache/scheduling/quota.json')
+            quota_path = suite_catalog.coordination_path(project, 'test/.cache/scheduling/quota.json')
             quota = load(quota_path) if quota_path.exists() else {'schema_version': 1, 'leases': {}}
             check(quota.get('schema_version') == 1 and isinstance(quota.get('leases'), dict), 'invalid quota ledger')
             for prior_path in candidates:
@@ -1501,6 +1633,8 @@ def start(project, args, spec, cov, full=True):
     if candidates:
         path = candidates[0]
         state = load(path)
+        check(state.get('suite', {'id': 'default-ui', 'kind': 'ui'}) == suite_catalog.suite(spec),
+              'run belongs to another suite; preserve it and start a separate round')
         check(state['scopes'] == scopes and state['fixed_scopes'] == sorted(spec.get('scope', {}).get('fixed', [])), 'resume scope mismatch')
         if state['acceptance'] in TERMINAL:
             check(args.resume, 'terminal run requires explicit --resume')
@@ -1524,6 +1658,7 @@ def start(project, args, spec, cov, full=True):
         rid = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + secrets.token_hex(4)
         path = run_path(project, rid) / 'state.json'
         state = {'schema_version': SCHEMA, 'run_id': rid, 'created_at': now(), 'scopes': scopes,
+                 'suite': suite_catalog.suite(spec),
                  'fixed_scopes': sorted(spec.get('scope', {}).get('fixed', [])), 'acceptance': 'in_progress',
                  'native_merge_required': True,
                  'freshness_marker': secrets.token_hex(12), 'source_checks': {}, 'recovery_required': False,
@@ -1651,6 +1786,7 @@ def apply_events(project, state, spec, cov, owner, events, writer=None):
                   'writer may not expand assigned task scope')
         record_event(project, updated, spec, newcov, dict(event, writer=writer), context)
     if newcov != cov:
+        newcov = suite_catalog.rebuild(newcov)
         errors = asset_errors(project, spec, newcov)
         check(not errors, 'coverage mappings invalid: ' + '; '.join(errors))
     updated['claim']['renewed_at'] = now()
@@ -1686,11 +1822,37 @@ def doctor(project):
                       'missing': missing, 'action': 'fill confirmed values in test/spec.md' if missing else None})
     if spec is not None and cov is not None:
         try:
+            cov = suite_catalog.project_view(project, spec, cov)
             errors = asset_errors(project, spec, cov)
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             errors = ['invalid asset shape: ' + type(error).__name__]
         items.append({'check': 'coverage_mappings', 'status': 'error' if errors else 'ok',
                       'errors': errors, 'action': 'repair listed coverage mappings' if errors else None})
+    journal_path = project / 'test/.cache/catalog-update.json'
+    try:
+        pending = journal_path.exists() and load(journal_path).get('complete') is not True
+        items.append({'check': 'catalog_update', 'status': 'error' if pending else 'ok',
+                      'action': 'run catalog-recover and review current assets' if pending else None})
+    except (ValueError, OSError, AttributeError):
+        items.append({'check': 'catalog_update', 'status': 'error',
+                      'action': 'reconcile unreadable catalog recovery journal'})
+    if spec is not None:
+        try:
+            roots = {suite_catalog.coordination_root(project)}
+            if 'catalog' in spec:
+                roots.add(suite_catalog.configured_root(project, spec, 'catalog'))
+            for root in sorted(roots - {project}):
+                ignore = subprocess.run(['git', 'check-ignore', '--no-index', '--stdin', '-z'],
+                                        input='test/.cache/__e2e_ignore_probe__\0', text=True,
+                                        capture_output=True, cwd=root, timeout=5)
+                index = subprocess.run(['git', 'ls-files', '-z', '--', 'test/.cache'],
+                                       text=True, capture_output=True, cwd=root, timeout=5)
+                valid = ignore.returncode == 0 and bool(ignore.stdout.strip()) and index.returncode == 0 and not index.stdout
+                items.append({'check': 'shared_cache_policy', 'status': 'ok' if valid else 'error',
+                              'action': None if valid else 'ignore shared /test/.cache/ and remove it from Git tracking'})
+        except (ValueError, OSError, AttributeError, subprocess.TimeoutExpired) as error:
+            items.append({'check': 'shared_roots', 'status': 'error', 'reason': str(error),
+                          'action': 'restore configured roots and reconcile shared state before dispatch'})
     try:
         # --no-index tests the ignore policy even if cache files were accidentally tracked.
         # NUL framing avoids text-mode CRLF becoming part of the probed Git path.
@@ -1732,6 +1894,8 @@ def write_report(project, state, spec, cov, persist_state=True):
     atomic(directory / 'report.html', report_artifacts.review_html(
         project, state, result['report_consistency']))
     lines = ['# E2E Run ' + state['run_id'], '', 'Acceptance: ' + state['acceptance'],
+             '', 'Suite: ' + result['coverage_layers']['suite']['id'] + ' / '
+             + result['coverage_layers']['suite']['kind'] + '（仅评价当前suite）',
              '', '报告一致性：' + result['report_consistency']['status'], '']
     lines += ['[本轮HTML入口：未通过优先](<' + str(directory / 'report.html') + '>)', '']
     if result['report_paths']['merged_html']:
@@ -1797,7 +1961,7 @@ def write_report(project, state, spec, cov, persist_state=True):
 def main(argv=None):
     parser = JsonArgumentParser(description=__doc__)
     helpers = {'preflight', 'validate-input', 'attempt-init', 'attempt-check', 'attempt-bundle', 'attempt-interrupted', 'attempt-collect', 'finalize', 'timing', 'pool-lease', 'pool-account', 'pool-return', 'pool-resolve'}
-    parser.add_argument('command', choices=['doctor', 'schema', 'init', 'start', 'renew', 'prepare-regression', 'collect-results', 'record', 'status', 'validate', 'report', 'release', *sorted(helpers)])
+    parser.add_argument('command', choices=['doctor', 'schema', 'init', 'migrate', 'catalog-recover', 'start', 'renew', 'prepare-regression', 'collect-results', 'record', 'status', 'validate', 'report', 'release', *sorted(helpers)])
     parser.add_argument('--project')
     parser.add_argument('--type', dest='event_type')
     parser.add_argument('--run')
@@ -1815,6 +1979,10 @@ def main(argv=None):
     parser.add_argument('--request')
     parser.add_argument('--workers', type=int)
     parser.add_argument('--slot', type=int)
+    parser.add_argument('--kind', choices=['ui', 'api'])
+    parser.add_argument('--suite-id')
+    parser.add_argument('--catalog-root')
+    parser.add_argument('--apply', action='store_true')
     output = parser.add_mutually_exclusive_group()
     output.add_argument('--brief', action='store_true')
     output.add_argument('--full', action='store_true')
@@ -1832,6 +2000,8 @@ def main(argv=None):
         check(args.project, '--project required')
         project = Path(args.project).resolve()
         check(project.is_dir(), 'project directory does not exist')
+        check(not (args.kind or args.suite_id or args.catalog_root or args.apply)
+              or args.command in {'init', 'migrate'}, 'suite creation options only apply to init or migrate')
         if args.command in helpers:
             helper_spec = importlib.util.spec_from_file_location(
                 'e2e_workflow_tools', Path(__file__).with_name(
@@ -1846,6 +2016,9 @@ def main(argv=None):
             result = doctor(project)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result['valid'] else 2
+        if args.command == 'migrate' and not args.apply:
+            print(json.dumps(migrate(project, args), ensure_ascii=False, indent=2))
+            return 0
         if args.command == 'prepare-regression':
             check(args.run and args.owner, 'prepare-regression requires --run and --owner')
             # Retention owns the same project lock; do not recursively acquire it.
@@ -1902,9 +2075,13 @@ def main(argv=None):
                 result = dict(status(project, state, spec, cov), retention=cleanup, preflight_reused=False)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
-        with project_lock(project):
+        with project_lock(project, shared=args.command not in {'init', 'migrate', 'catalog-recover'}):
             if args.command == 'init':
-                result = initialize(project)
+                result = initialize(project, args)
+            elif args.command == 'migrate':
+                result = migrate(project, args)
+            elif args.command == 'catalog-recover':
+                result = suite_catalog.recover(project, atomic)
             else:
                 spec, cov = assets(project)
                 if args.command == 'start':
@@ -1934,7 +2111,7 @@ def main(argv=None):
                         added = updated['events'][len(state['events']):]
                         sync_recorded_pools(project, updated, added)
                         if newcov != cov:
-                            atomic(project / 'test/plans/coverage.json', newcov)
+                            suite_catalog.persist(project, cov, newcov, atomic)
                         atomic(path, updated)
                         for event in added:
                             if event['type'] == 'task':

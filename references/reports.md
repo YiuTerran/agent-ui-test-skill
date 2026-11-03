@@ -4,6 +4,8 @@
 
 指定case复测或只跑自动化先按[直接完成](workflow.md#确定性任务直接完成)执行；以下机器绑定契约适用于工作流管理的run。直接执行保留原生JSON/HTML/blob、真实命令回执及资源账本，单次原生HTML可交付。工作流登记和最新需求验收状态分别说明，不为补登记而扩大范围、修改执行中的输入或重复业务测试。
 
+UI/API共享报告绑定机制，各suite独立执行及合并。summary.coverage_layers列出suite、业务case数、本地实现与results_by_kind，另一required_kind显示not_evaluated。业务case、实现、原生project/retry/repeat实例分别计数；本suite的full完整不代表项目全部类型或另一工程已通过。HTTP响应、状态回读及清理回执是API证据，不能把源码阅读或Mock通过计为真实接口执行。
+
 ## 每次命令独立保存
 
 run可以包含多次CLI执行。每次分配新的`bundle_id`，重跑、认证重试及不同subset均保留独立目录：

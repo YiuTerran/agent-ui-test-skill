@@ -52,7 +52,7 @@ def close_returned_requests(wf, project, state, ledger):
         del requests[state['run_id']]
         if not requests:
             del ledger['pools'][name]['requests']
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
 
 
 def request_name(wf, args):
@@ -105,7 +105,7 @@ def history(wf, account, state, action, item=None):
 
 
 def lease(wf, project, args, state, spec):
-    limit = wf.pool_config(spec, args.pool)['max_accounts']
+    limit = wf.check_pool_limit(project, spec, args.pool)
     request_id = request_name(wf, args)
     wf.check(type(args.count) is int and args.count > 0, '--count must be a positive integer')
     wf.check(request_id not in state.get('closed_pool_requests', {}).get(args.pool, []),
@@ -136,7 +136,7 @@ def lease(wf, project, args, state, spec):
         account.update(status='leased', leased_by_run=state['run_id'],
                        leased_by_request=request_id, leased_at=wf.now())
         history(wf, account, state, 'leased')
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
     return {'valid': True, 'pool': args.pool, 'request': request_id, 'leased': assigned,
             'lease_file': write_leases(wf, project, state['run_id'], ledger)}
 
@@ -172,7 +172,7 @@ def give_back(wf, project, args, state, spec):
             account['quarantine'] = {'run_id': state['run_id'], 'issue_id': item['issue_id'],
                                      'reason': item.get('reason'), 'evidence': item['evidence'], 'at': wf.now()}
         history(wf, account, state, 'returned_' + item['result'], item)
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
     close_returned_requests(wf, project, state, ledger)
     return {'valid': True, 'pool': args.pool, 'returned': {i['pool_ref']: i['result'] for i in items},
             'lease_file': write_leases(wf, project, state['run_id'], ledger)}
@@ -195,7 +195,7 @@ def resolve(wf, project, args, state, spec):
         if item['result'] == 'available':
             account['baseline_evidence'] = item['evidence']
         history(wf, account, state, 'resolved_' + item['result'], item)
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
     return {'valid': True, 'pool': args.pool, 'resolved': {i['pool_ref']: i['result'] for i in items}}
 
 

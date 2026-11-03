@@ -14,7 +14,7 @@ CATEGORIES = {'product_candidate', 'needs_decision', 'environment', 'script', 'c
               'api_exclusive', 'deferred', 'unbound_observation', 'cleanup_unknown'}
 
 
-def action(item):
+def action(item, test_kind=None):
     if item.get('permission_required'):
         return 'awaiting_authorization'
     if item.get('cleanup_unknown') or item['category'] == 'cleanup_unknown':
@@ -26,6 +26,8 @@ def action(item):
             return 'review_environment_state'
         return ('diagnose_dependency_before_retry' if item['environment_changed']
                 else 'awaiting_environment_change')
+    if item['category'] == 'api_exclusive' and test_kind is not None:
+        return 'diagnose_api' if test_kind == 'api' else 'review_api_scope'
     return {'product_candidate': 'triage_product_no_automatic_fix', 'needs_decision': 'diagnose_readonly',
             'condition_missing': 'supply_condition', 'api_exclusive': 'handoff_api',
             'deferred': 'preserve_deferred', 'unbound_observation': 'preserve_evidence_limitation'}[item['category']]
@@ -37,8 +39,10 @@ def build(project, request):
 
 
 def build_locked(project, request):
-    check({'items'} <= set(request) <= {'items', 'resource_environment'},
-          'worklist requires items; optional resource_environment')
+    check({'items'} <= set(request) <= {'items', 'resource_environment', 'test_kind'},
+          'worklist requires items; optional resource_environment and test_kind')
+    test_kind = request.get('test_kind')
+    check('test_kind' not in request or test_kind in {'ui', 'api'}, 'test_kind must be ui or api')
     environment = request.get('resource_environment')
     if environment is not None:
         identifier(environment)
@@ -75,7 +79,7 @@ def build_locked(project, request):
         blocked_kinds = residual_gate(pending_kinds, item.get('resource_access'))
         if blocked_kinds:
             item['cleanup_unknown'] = True
-        todo = action(item)
+        todo = action(item, test_kind)
         basis = 'explicit_root_cause' if item.get('root_cause_id') else ('component_triage_only' if item.get('component') else 'individual')
         group_id = item.get('root_cause_id') or item.get('component') or item['case_id']
         key = (item['category'], todo, basis, group_id)
@@ -92,7 +96,7 @@ def build_locked(project, request):
     packages = sorted(groups.values(), key=lambda g: (g['action'], g['category'], g['group_id']))
     for group in packages:
         group['case_ids'].sort()
-    return {'schema_version': 2, 'input_sha256': digest(request), 'counts': dict(Counter(i['category'] for i in request['items'])),
+    return {'schema_version': 3 if test_kind else 2, 'input_sha256': digest(request), 'counts': dict(Counter(i['category'] for i in request['items'])),
             'residual_index_sha256': digest(index),
             'item_count': len(seen), 'package_count': len(packages), 'packages': packages,
             'execution_or_acceptance_changed': False,

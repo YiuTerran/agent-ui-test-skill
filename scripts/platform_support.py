@@ -13,7 +13,7 @@ MIN_PYTHON_VERSION = (3, 10)
 def require_supported_python():
     if sys.version_info[:2] < MIN_PYTHON_VERSION:
         version = '.'.join(str(part) for part in sys.version_info[:3])
-        raise SystemExit('ego-lite-playwright-e2e requires Python 3.10+; detected '
+        raise SystemExit('auto-test-skill requires Python 3.10+; detected '
                          + version + ' at ' + sys.executable
                          + '. Use a compatible interpreter for all skill commands.')
 

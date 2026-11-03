@@ -33,6 +33,20 @@ class SourceCacheTest(unittest.TestCase):
         self.assertEqual('reuse', result['action'])
         self.assertEqual(2, result['verified_files'])
 
+    def test_shared_snapshot_keeps_observation_in_its_own_project(self):
+        evidence_root = self.root / 'backend'
+        evidence_root.mkdir()
+        with self.assertRaises(ValueError):
+            cache.verify(self.root, self.request, evidence_project=evidence_root)
+        (evidence_root / 'observation.json').write_text('{}')
+        self.assertEqual('reuse', cache.verify(self.root, self.request, evidence_project=evidence_root)['action'])
+        (self.root / 'doc.md').write_text('tampered shared snapshot')
+        (evidence_root / 'doc.md').write_text('body')
+        self.assertFalse(cache.verify(self.root, self.request, evidence_project=evidence_root)['cache_hit'])
+        self.request['observation']['evidence'] = '../observation.json'
+        with self.assertRaises(ValueError):
+            cache.verify(self.root, self.request, evidence_project=evidence_root)
+
     def test_missing_and_modified_attachment_invalidate_reuse(self):
         (self.root / 'image.png').write_bytes(b'changed')
         self.assertFalse(cache.verify(self.root, self.request)['cache_hit'])

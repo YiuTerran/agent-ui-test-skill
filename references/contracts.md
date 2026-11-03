@@ -11,6 +11,9 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 | 命令/参数 | 作用与门禁 |
 | --- | --- |
 | `init` | 原子补齐`test/spec.md`、`test/plans/coverage.json`，已有文件字节不变；返回created/preserved、缺项及发现的配置/脚本名称，不回显脚本正文，不推测授权 |
+| `init --kind ui/api [--suite-id ID] [--catalog-root DIR]` | 新工程创建类型明确的suite、版本2本地实现与业务catalog；suite-id默认类型，catalog-root默认`.`，加入已有catalog不改其字节；拒绝覆盖已有工作流 |
+| `migrate [--suite-id ID] [--apply --input PREVIEW]` | 旧UI格式原地迁移，默认只读预览；apply须与已核实预览一致，无未完成run/活跃配额，不把旧UI转为API |
+| `catalog-recover` | 仅补齐已登记且未冲突的跨文件catalog/本地实现/迁移配置提交，不改原始测试结果；之后恢复run并核对输入 |
 | `doctor` | 只读检查项目资产、配置/映射、`test/.cache/`的Git忽略规则及是否已有文件进入Git索引；不补文件、不修改`.gitignore`或启动run |
 | `preflight --owner NAME [--run RUN] [--input FILE]` | 本地诊断及一次start/renew，汇总已提供的真实来源观察、完整发现JSON与覆盖差集；不访问远端或执行测试，未提供输入保持unknown |
 | `validate-input --run RUN --owner NAME --type TYPE --input FILE` | 无副作用重放record或collect-results门禁；TYPE=source/execution/record/report_bundle，不提交状态、coverage或创建锁 |
@@ -42,7 +45,7 @@ Python3.10+标准库脚本只管理本地状态/证据，不访问网络、启�
 
 身份池的权威账本将request与账号租用原子提交；`identity-leases.json`仅为schema_version=2的派生缓存，按`requests.<request>.pools.<池名>`记录worker_count及accounts。归还槽位置null，不压缩数组；缓存写入失败以原request重试，不另起request租号。fixture按[复用池](browser-and-auth.md#临时身份复用池)核验槽位及实际并发，不能从旧缓存直接取号。
 
-**池账本同步**：record/finalize只对本批新增带pool的retained_verified资源触发同步，且只同步当前run；同步失败先于state和finalize检查点提交，重试不重复追加事件。池登记与state仍非多文件事务：若池登记成功后state写入失败，以原事件重试，登记按资源origin幂等；pool-lease/pool-return会全量补登记。
+**池账本同步**：record/finalize对本批带pool的资源同步当前run的待核实占用；retained_verified同步可复用账号。共享上限必须一致，origin_project标识证据所属工程。同步失败先于state和finalize检查点提交，重试不重复追加事件。池登记与state仍非多文件事务：若池登记成功后state写入失败，以原事件重试，登记按资源origin幂等；pool-lease/pool-return会全量补登记。
 
 **request回收**：池账号全部归还后，已用request ID先持久化到各自run的state.closed_pool_requests，再从全局账本清除详细分配；旧ID不可复用。
 
@@ -66,6 +69,8 @@ work_needed_reasons可直接定位review_not_approved、implementation_not_valid
 - 预检提交在锁内重读最新状态，合并cleanup_batches与已检查scopes；plan_scopes单独记录实际删除计划范围（旧格式回退scopes），缓存复用依据它。并发a-only/b-only不能证明a+b混合bundle已清，下次全scope预检仍需联合扫描，不重复累计旧批次。
 
 ## Git资产
+
+以下旧版字段继续兼容。新suite使用版本2业务catalog与本地implementations，workflow-config自身仍为版本1；suite/catalog/coordination、共享字段、业务ID与实现ID、预览迁移及恢复的完整约定见[测试套件与共享用例](suites-and-cases.md)。status包含suite，summary.coverage_layers按当前suite报告，不合并另一类型的通过结果。
 
 工作流元数据固定使用`test/spec.md`、`test/plans/coverage.json`和`test/.cache/`；`test/spec.md`中唯一的`json workflow-config`围栏块为工作流配置来源，初始值见[模板](../assets/spec.template.md)。已有测试、fixture、Playwright配置及命令cwd沿用项目布局，以coverage的spec/plan、真实发现及Attempt的cwd绑定；`test/src/`仅为新工程建议。直接回归无需初始化这些资产，调度配置可单独指定[config_path](#双预算与就绪任务)。
 
@@ -244,13 +249,13 @@ report返回summary、report_bundles、可选merged_report、report_consistency�
 | resources | available_cpus、available_memory_bytes、available_agent_slots、independent_tasks、pressure，未知null；尽力探测CPU/内存，Agent空槽由宿主提供 |
 | tasks[task_id] | phase/status/owner/dependencies/writable_paths/conflict_keys/case_ids/isolation；readable_paths可选，缺省[]；实际传递fixture/helper/配置/认证输入由执行者声明 |
 | isolation | 核实隔离用verified；无写集也填[]。未知只在自己isolation_group/case范围串行，无范围则保守串行 |
-| quota | agents/exploration_browsers/playwright_workers；CLI workers必须等于实际--workers，与探索浏览器共享上限 |
+| quota | agents/exploration_browsers/playwright_workers；CLI workers等于实际--workers。UI worker计浏览器，API worker只计执行CPU/内存预算；任务test_kind覆盖请求/当前suite类型，API的exploration为代码阅读 |
 | acquire | 原子重核预算/就绪；仅acquired=true可启动；false含配额/冲突原因，不先重复budget/ready |
 | release/reap | release用lease_id/release_token，teardown后释放；reap须同宿主owner_pid确认死亡或规范workflow任务终态，不按超时猜回收 |
 
 异常退出后使用既有`reap`核实回收条件，不手改quota账本。配额回收仅解除本地调度占用，不证明测试创建的业务资源已清理；项目fixture的锁、身份池和资源残留分别核验，清理证据继续走原有资源事件与派发门禁。
 
-config_path只选择调度配置，不改变工作流元数据位置。所有调用保持同一PROJECT，共享规范的`test/.cache/scheduling`配额账本与`test/.cache/resource-residuals.json`残留索引，不通过更换目录拆分安全状态。
+config_path只选择调度配置和默认test_kind，不改变规范工作流元数据及coordination根目录；显式null时类型可由请求test_kind给出，缺省UI。规范配置的coordination.root决定共享配额、身份池及残留索引；缺省本工程。各工程保持自己的PROJECT，不通过config_path、更换目录或切root拆分安全状态，见[资源协调](suites-and-cases.md#资源协调)。browser_parallel_cap可为0，纯API仍受worker预算约束；API worker每个约256MiB是预算估计，不是服务并发或实测内存承诺。
 
 ```json
 {"run_id":"RUN","owner":"worker-a","owner_pid":12345,"task_id":"explore-a",

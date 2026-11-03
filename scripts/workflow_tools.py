@@ -60,7 +60,9 @@ def source_checks(wf, project, state, spec, cov, request):
         # A resumed run starts a new observation round; creation time is insufficient.
         round_start = max([state['created_at']] +
                           [v['at'] for v in state.get('resume_history', [])], key=wf.dt)
-        result = verifier.verify(project, dict(item, round_started_at=round_start))
+        snapshot_root = cov.root if isinstance(cov, wf.suite_catalog.Coverage) else project
+        result = verifier.verify(snapshot_root, dict(item, round_started_at=round_start),
+                                 evidence_project=project)
         baseline = cov.get('sources', {}).get(sid, {})
         observation = item.get('observation', {})
         result['matches_effective_baseline'] = (
@@ -118,7 +120,7 @@ def discovery_diff(wf, project, state, spec, cov, request):
         if case.get('execution') == 'automation':
             target = legacy_mapping if case.get('legacy_group') else mapping
             target.setdefault((case.get('spec'), case.get('title')), []).append(cid)
-        if case.get('plan') and not wf.safe_path(project, case['plan']).is_file():
+        if case.get('plan') and not wf.suite_catalog.asset_path(project, cov, case['plan']).is_file():
             result['missing_plan_files'].append(cid)
     matched = set()
     for row in rows:
@@ -318,6 +320,7 @@ def attempt_init(wf, project, args):
             plan['code_scope_review'] = wf.report_artifacts.code_import_hints(project, wf.load(path), roots)
         plan['shard'] = wf.report_artifacts.command_shard(plan['command'])
         plan.update(bundle_id=args.bundle, run_id=state['run_id'], schema_version=2,
+                    suite=wf.suite_catalog.suite(spec),
                     planned_at=wf.now(),
                     freshness_marker=state['freshness_marker'],
                     config_fingerprint=wf.fingerprint(spec), asset_fingerprint=wf.fingerprint(cov))

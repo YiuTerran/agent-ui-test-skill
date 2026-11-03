@@ -836,6 +836,7 @@ def review_html(project, state, consistency):
     """Failure-first derived index across all invocations, including unbound raw results."""
     root = Path('test/.cache/runs') / state['run_id']
     escape = lambda value: html.escape(str(value), quote=True)
+    suite = state.get('suite', {'id': 'default-ui', 'kind': 'ui'})
 
     def link(value, label):
         path_in(project, value)
@@ -925,6 +926,7 @@ td,th{padding:10px;text-align:left;border-bottom:1px solid #d6ddd7;vertical-alig
 tr[data-priority="0"]{background:#fff0ec}tr[data-priority="1"],tr[data-priority="2"]{background:#fff9e5}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:700px}.scroll{overflow:auto}
 </style><main><h1>本轮测试报告 · ''' + escape(state['run_id']) + '''</h1><p>''' + primary + '''</p>
+<p>Suite：''' + escape(suite['id']) + ' · ' + escape(suite['kind']) + '''（本报告只评价该suite）</p>
 <p>顺序：失败 → 非预期/重跑后通过 → 跳过/未执行 → 通过。Setup与每次原始尝试均保留，不代表唯一用例数。</p>
 <p>报告一致性：''' + escape(consistency['status']) + '</p><p>收尾全量目标集合：' + escape(completeness['status']) + '''
 （与执行者声明完整的发现清单比较，独立于通过/失败）</p>
