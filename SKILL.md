@@ -108,7 +108,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 既有业务数据默认只读，共享数据按准确owned证明逆依赖清理；未知创建结果不重试、不猜测删除。用户明确授权整体重置的独占数据域，按获准resource kinds及当前完整盘点执行reset，旧unknown缺逐条receipt不阻挡此恢复路径；保留用户确认的准确保护基线；项目确认的共享/系统数据域禁止reset，不从域名或ID推定隔离性。日常case cleanup与轮末独立scope sweep均实际执行，reset仅凭完整scope absence及实际cleanup_state桥接关闭相关unknown/残留；停源、互斥、分页、依赖及retained规则见[清理与专用域reset](references/cleanup.md)。范围内共享配置按原值恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
 - 清理未决立即通过checkpoint的`cleanup_state`增量登记跨run索引，按稳定环境、kind、准确ID去重，阻断相关写资源包和后续claim；明确只读或无相关资源依赖的case继续。恢复前核对[项目资源恢复契约](references/cleanup.md#项目资源恢复契约)中的身份、应用上下文及逐kind缺席语义，再凭匹配资源的absence/retained_verified回读证据恢复，不以test passed、close或普通unblock解除。报告分别列单轮残留、历史累计和本轮清理数量；错误msg先脱敏，见[跨run残留门禁](references/checkpoints.md#跨run残留门禁)。
 - 所有runner启动产品CLI前必须通过残留门禁：使用checkpoint的重新claim，或调用`checkpoint.py gate`并检查退出码。`workflow attempt-init`本身不读取残留索引，非checkpoint runner必须在pre-dispatch接入gate；未知写scope在已有残留时fail closed，明确readonly可继续。升级脚本、生成工作包或成功attempt-init均不代表已接入。
-- 独立case并行、共享资源按环境/账号/组织/配置/数据冲突组局部串行。执行前领取共享配额，teardown后释放；资源信息不足从一个任务开始。API worker不自动占浏览器；跨工程共用资源必须配置相同coordination.root及冲突键，目录共享不证明隔离。
+- 独立case并行、共享资源按环境/账号/组织/配置/数据冲突组局部串行。Agent并发按[定时资源控制](references/resource-control.md)调整：默认30秒采样，CPU或内存达到80%每轮排空一个最新sub，两项低于60%有任务和槽位时增加一个，最低1主1sub；高压或采样未知暂停新增case。减员完成当前case及cleanup后退出，不强杀。执行前领取容量/冲突配额，teardown后释放；动态模式跨UI/API共享实测容量，API worker不自动占浏览器。跨工程共用资源配置同一coordination.root、controller及冲突键；旧runner未接入时不声称定时扩缩容。
 - 工作流新run的`native_merge_required=true`：每个结果bundle必须绑定当前schema的Attempt计划及摘要、原始JSON和blob，正常同时生成HTML；完整绑定Setup、业务case、retry及未执行结果，最终合并全部结果blob并核验。直接执行的原始结果单独交付，不冒充已登记bundle或需求验收。中断产物不齐的调用独立登记仅回执，不计结果或完整性。JSON-only保留为旧run的受限兼容路径。失败、重跑后通过及未执行置前，不以缺失证据推断通过。
 - 新Attempt仅允许追加固定reporter/output参数，执行选择条件进入计划command。新run的完整验收必须满足`regression_completeness=complete`，覆盖绑定完整发现清单的收尾full及全部目标/分片；业务结果另行核验。缺少计划、full或目标时阻止完整验收，`not_declared`仅用于旧run；完整发现声明仍需真实命令审阅。
 - 默认每轮执行前回收相关模块旧报告；跨run续跑先显式保护仍被复用的原生产物，无法完整声明依赖时通过项目配置关闭自动回收，见[断点证据保护](references/checkpoints.md#跨run证据与回收)。只自动删除缓存白名单内安全归属明确的产物，保护当前run、有效审批/baseline及未核清资源恢复证据。回收记录不能改写历史结论。
@@ -121,14 +121,16 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 事件字段、CLI、平台和缓存回收契约：[契约](references/contracts.md)
 - Playwright输出、绑定、报告合并：[报告绑定](references/reports.md)
 - 实际ego-lite、认证和人工等待：[浏览器与认证](references/browser-and-auth.md)及当前安装的ego-browser技能
+- 实测资源采样、Agent扩缩容及宿主adapter：[定时资源控制](references/resource-control.md)
 - 统一预检、事件预校验、Attempt模板和耗时：[本地辅助入口](references/local-tools.md)
 
 内部工具按需调用，字段见[契约](references/contracts.md#提速辅助脚本)：
 - `scripts/scheduling.py acquire|release`：实际探索/CLI前领取共享配额，teardown后释放
+- `scripts/resource_controller.py sample|step|watch`：实测CPU/内存，定时决策并通过宿主adapter安全增减Agent
 - `scripts/source_cache.py capture|verify`：新来源导出后留指纹清单，后续有新观察时校验复用
 - `scripts/retention.py plan|apply`：手动预览/恢复；日常回归已由prepare-regression组合调用
 
-脚本处理本地状态、配额、来源缓存、安全回收和报告核验，finalize还可执行本地Playwright离线合并，不启动Agent或执行产品测试，不读取远端来源。入口为`python3 <skill>/scripts/workflow.py`（Windows用`py -3`）。无类型`init`兼容补缺，带`--kind`的新suite初始化要求工作流资产不存在；已有UI资产用`migrate`。`doctor`只读诊断；`schema`查看输入字段。`record`/`collect-results`默认简报，`--full`按需展开；最终验收/报告仍完整核验。
+工作流脚本处理本地状态、配额、来源缓存、安全回收和报告核验，finalize还可执行本地Playwright离线合并，不直接执行产品测试或读取远端来源；独立资源控制器按显式adapter调用宿主增减Agent，执行与清理由项目runner负责。入口为`python3 <skill>/scripts/workflow.py`（Windows用`py -3`）。无类型`init`兼容补缺，带`--kind`的新suite初始化要求工作流资产不存在；已有UI资产用`migrate`。`doctor`只读诊断；`schema`查看输入字段。`record`/`collect-results`默认简报，`--full`按需展开；最终验收/报告仍完整核验。
 
 工作流元数据固定使用`test/spec.md`、`test/plans/coverage.json`和Git忽略的`test/.cache/`；`test/src/`只是新工程建议。已有测试、fixture、Playwright配置和命令cwd沿用项目布局，通过coverage的spec/plan、真实发现及Attempt的cwd绑定，不能为了接入搬迁代码。直接回归不要求初始化这些资产；调度配置与既有`test/spec.md`冲突时使用[config_path](references/contracts.md#双预算与就绪任务)，共享配额和残留索引仍使用同一PROJECT。
 

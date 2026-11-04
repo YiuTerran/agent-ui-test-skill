@@ -11,14 +11,15 @@
 - UI 使用 ego-lite 探索真实页面；API 阅读需求与后端代码，再通过真实 HTTP 验证。
 - 共享业务用例及来源，前后端 suite 分别维护本地实现、配置、执行和报告；某类通过不代表另一类通过。
 - 以本地 CLI 管理来源快照、审批证据、运行租约、共享配额和资源清理记录。
+- 按真实 CPU/内存定时调节 Agent 并发，高压逐个排空，空闲逐个增加，UI/API 共用容量。
 - 绑定每次 Playwright CLI 的原始 JSON、blob 和 HTML，核验全轮合并报告，保留失败、重试和未执行结果。
 - 只自动回收安全白名单内的本地产物，不删除业务数据；业务代码修改需另行授权。
 
-脚本只管理本地状态和证据，**不会启动 Agent、浏览器或产品测试**。安装技能不等于获得目标系统的访问或写入授权。
+工作流脚本管理本地状态和证据，浏览器与产品测试由项目 runner 执行。可选资源控制器通过明确配置的宿主 adapter 启动和排空 Agent；仅提供原生工具的宿主由主 Agent 周期调用并落实动作，见[定时资源控制](references/resource-control.md)。安装技能不等于获得目标系统的访问或写入授权。
 
 ## 前置条件
 
-- Python **最低 3.10**；本仓库脚本与单元测试仅依赖标准库，无需 `pip install`。所有辅助命令启动时检查实际解释器，版本过低直接退出并显示版本和路径；同一流程固定使用已验证的解释器，不能只凭 `python3` 命令名判断版本。
+- Python **最低 3.10**；原有工作流工具仅依赖标准库，动态资源采样另需 `scripts/requirements-resource-controller.txt` 中的 psutil。所有辅助命令启动时检查实际解释器，版本过低直接退出并显示版本和路径；同一流程固定使用已验证的解释器，不能只凭 `python3` 命令名判断版本。
 - 执行已有自动化时，目标项目具备 Node.js、项目本地 Playwright 及必要夹具；UI 需要浏览器，纯 API 不需要。直接回归无需 ego-browser 或需求来源读取工具。
 - 新增页面探索默认使用 `ego-browser` 技能及 ego-lite 集成；本仓库不分发该依赖。资料读取工具仅在核验对应来源时需要。
 - 按当前阶段确认需求预期、测试环境、身份权限和 E2E 数据边界；已有回归沿用既有预期。
@@ -103,10 +104,11 @@ scripts/tests/      合成数据单元测试及可选的临时HTTP服务集成�
 从仓库根目录运行：
 
 ```sh
+python3 -m pip install -r scripts/requirements-resource-controller.txt
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-CI 配置覆盖 Linux、macOS、Windows，以及 Python 3.10 和 3.13。
+CI 配置覆盖 Linux、macOS、Windows，以及 Python 3.10 和 3.13，安装可选资源采样依赖以检查真实采样路径。资源控制器测试只启动临时空闲进程，并用低阈值触发缩容，不对宿主制造真实高负载。
 平台专属测试可能跳过；非 Windows 的通过不能证明 Windows 原生句柄、junction 或进程行为正确。
 CI 默认验证本地工具，不验证 ego-lite、真实登录或产品业务行为。可选的真实 HTTP 集成测试使用本机已有 Playwright，对临时回环服务执行请求，不下载浏览器：
 

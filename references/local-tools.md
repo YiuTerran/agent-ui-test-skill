@@ -10,6 +10,10 @@ UI/API使用相同辅助入口，API不要求浏览器；新工程用`init --kin
 
 直接回归无需ego-browser或需求来源读取工具；只有新增页面探索、来源核验等对应阶段才检查其依赖。调度请求可用[config_path](contracts.md#双预算与就绪任务)指定项目相对配置路径，或显式null跳过读取无关的test/spec.md；不改变同一PROJECT的共享配额与残留索引。
 
+## 定时资源控制
+
+独立入口`resource_controller.py sample|step|watch`用psutil实测CPU/内存，默认30秒检查、80%减员、60%以下扩容，最低1主1sub。watch经显式宿主adapter自动启动或排空其拥有的sub，step供主Agent接宿主原生工具；均不强杀运行中的任务。动态派发请求须绑定resource_controller，状态失效时暂停新增。依赖、完整输入、幂等adapter及安全收尾见[定时资源控制](resource-control.md)；此入口的可选psutil依赖和adapter执行是本页标准库辅助工具之外的明确例外。
+
 ## 确定性批量入口
 
 ### 一次采集

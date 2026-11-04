@@ -147,6 +147,30 @@ class ToolsTest(TestCase):
         self.assertTrue(result['runtime']['checks']['python']['valid'])
         self.assertEqual('not_checked', result['runtime']['checks']['node']['status'])
 
+    def test_discovery_snapshots_survive_caller_file_reuse(self):
+        self.write('discovery.json', self.inventory())
+        original = (self.project / 'discovery.json').read_bytes()
+        self.write('preflight.json', {'discovery': {'path': 'discovery.json', 'complete': True, 'setup_projects': []}})
+        with self.ignored():
+            result = self.cli('preflight', '--owner', self.owner, '--input', str(self.project / 'preflight.json'))
+        self.run = result['run']['run_id']
+        first = self.state()['discovery_inventory']
+        changed = self.inventory()
+        changed['suites'][0]['specs'].pop()
+        self.write('discovery.json', changed)
+        with self.ignored():
+            self.cli('preflight', '--run', self.run, '--owner', self.owner,
+                     '--input', str(self.project / 'preflight.json'))
+        second = self.state()['discovery_inventory']
+        self.assertNotEqual(first['path'], second['path'])
+        self.assertEqual((self.project / first['path']).read_bytes(), original)
+        self.assertEqual(hashlib.sha256(original).hexdigest(), first['sha256'])
+        self.assertEqual(self.state()['discovery_inventory_history'][-1], first)
+        with self.ignored():
+            self.cli('preflight', '--run', self.run, '--owner', self.owner,
+                     '--input', str(self.project / 'preflight.json'))
+        self.assertEqual(self.state()['discovery_inventory'], second)
+
     def test_preflight_runtime_failure_never_creates_or_renews_run(self):
         mkdir = Path.mkdir
 

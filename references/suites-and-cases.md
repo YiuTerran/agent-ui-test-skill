@@ -109,8 +109,10 @@ python3 "$SKILL_DIR/scripts/workflow.py" migrate --project "$PROJECT" --suite-id
 
 目录须预先存在，`test/.cache/`须忽略；root与catalog可不同。共享配额、身份池和checkpoint残留索引在此目录，run/证据/报告仍留本工程。环境标识、池名、池上限与账号/组织/配置/业务资源conflict_keys必须一致；调度owner_pid须代表实际任务。
 
-API执行占playwright_workers，不自动占浏览器；browser_parallel_cap可设0。默认UI保留worker与浏览器绑定，实际浏览器认证另以UI任务声明。CPU/内存未知时保守派发，资源压力停止新增；worker内HTTP并发和服务限流仍由项目fixture控制。
+UI和API按test_kind分别计算Agent与playwright_workers配额，各自应用本工程concurrency配置；旧租约未写test_kind时归入UI。配额账本保留全局计数和active_by_kind分类计数，UI占满其worker或Agent上限时仍可派发有余量的API任务。API执行占自身playwright_workers，browser_parallel_cap可设0；UI保留worker与浏览器绑定，实际浏览器认证另以UI任务声明。整机可用CPU、内存、宿主槽位及pressure继续限制派发，内存估计包含两类活跃占用；类型独立不等于物理资源无限。CPU/内存未知时保守派发，worker内HTTP并发和服务限流仍由项目fixture控制。
 
 所有writer在派发前执行共享残留gate；cleanup_state仍须真实回读证明，不以进程退出代替资源缺席。共享目录不可用、配置不一致或状态未知时停止相关派发，不临时退回各自账本。遗留本地账本已有活跃租约、池账号或残留时，先在原配置下核清后再启用共享协调，不能通过切root清空占用。
+
+启用[定时资源控制](resource-control.md)后，UI/API共用同宿主controller及实测执行者容量，不再用上段固定每worker内存估计判断扩容；各suite显式并发/浏览器上限继续有效。资源预留只协调启动竞争，当前物理占用以实时采样为准；减员须完成当前case和cleanup，不提前释放租约。
 
 首次状态操作绑定规范coordination根目录到本地`test/.cache/coordination-root.json`；之后修改root会被拒绝，即使新目录为空。未绑定但已有本地配额、身份池或残留账本时也拒绝直接切换。当前不提供跨根状态迁移命令，需在原配置下对账并经审核迁移；不能删除绑定或账本来解阻。外部coordination模式的回收保守保留本工程历史run产物，报告给出`external_coordination_preserves_runs`限制，以免删除共享池仍引用的本地证据；不会声称已实现跨工程证据垃圾回收。

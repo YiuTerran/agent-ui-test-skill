@@ -189,6 +189,28 @@ def preflight(wf, project, args):
                         'error': str(error), 'run_started': True,
                         'next_steps': ['repair_supplied_evidence_then_reuse_this_run']}
         if diff['status'] == 'checked':
+            source = wf.safe_path(project, diff['evidence'])
+            payload = source.read_bytes()
+            checksum = wf.hashlib.sha256(payload).hexdigest()
+            wf.check(checksum == diff['evidence_sha256'], 'discovery changed during preflight')
+            snapshot_relative = f"test/.cache/runs/{state['run_id']}/discovery/{checksum}.json"
+            snapshot = safe_cache(wf, project, snapshot_relative)
+            if snapshot.exists():
+                wf.check(snapshot.read_bytes() == payload, 'discovery snapshot changed')
+            else:
+                wf.platform_support.ensure_directory(snapshot.parent, parents=True)
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=snapshot.parent, delete=False) as stream:
+                        temporary = Path(stream.name)
+                        stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, snapshot)
+                    wf.platform_support.sync_directory(snapshot.parent)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
             context = {'coverage': {cid: diff['code_review_gaps'].get(cid, [])
                                     for cid in wf.scoped_cases(state, cov)}}
             gaps = {cid for cid in wf.scoped_cases(state, cov)
@@ -197,7 +219,8 @@ def preflight(wf, project, args):
             gaps.update(cid for row in diff['legacy_shared_tests'] for cid in row['case_ids'])
             state['automation_gap_case_ids'] = sorted(gaps)
             inventory = {
-                'path': diff['evidence'], 'sha256': diff['evidence_sha256'],
+                'path': snapshot_relative, 'sha256': checksum,
+                'source_path': diff['evidence'],
                 'setup_projects': request['discovery']['setup_projects'],
                 'scopes': state['scopes'], 'freshness_marker': state['freshness_marker'],
                 'missing_tests': diff['missing_tests'],

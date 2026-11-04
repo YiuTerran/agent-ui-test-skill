@@ -266,10 +266,10 @@ def empty_ledger():
     return {'schema_version': 1, 'leases': {}, 'peak': dict.fromkeys(QUOTAS, 0)}
 
 
-def counts(leases):
+def counts(leases, kind=None):
     result = dict.fromkeys(QUOTAS, 0)
     for lease in leases:
-        if lease['status'] == 'active':
+        if lease['status'] == 'active' and (kind is None or lease['task'].get('test_kind', 'ui') == kind):
             for key in QUOTAS:
                 result[key] += lease['quota'][key]
     return result
@@ -278,21 +278,62 @@ def counts(leases):
 def quota_view(ledger):
     active = counts(ledger['leases'].values())
     return {'active': active, 'peak': dict(ledger['peak']),
+            'active_by_kind': {kind: counts(ledger['leases'].values(), kind) for kind in ('ui', 'api')},
             'count_basis': 'observed_reservations_not_running_processes',
             'estimated_active_browser_memory_bytes': active['browsers'] * BROWSER_BYTES,
             'estimated_peak_browser_memory_bytes': ledger['peak']['browsers'] * BROWSER_BYTES,
             'measured_peak_memory_bytes': None}
 
 
-def budget(project, data, ledger, independent=None):
+def budget(project, data, ledger, independent=None, unreserved=None):
     config, config_sources = configuration(project, data.get('concurrency', {}),
                                            data.get('config_path', 'test/spec.md'))
     facts, fact_sources = resource_facts(data)
-    active = counts(ledger['leases'].values())
+    kind = request_kind(project, data)
+    active = counts(ledger['leases'].values(), kind)
+    global_active = counts(ledger['leases'].values())
+    unreserved = unreserved or []
+    other_usage = {key: sum(task['quota'][key] for task in unreserved
+                            if task.get('test_kind', 'ui') != kind) for key in QUOTAS}
     requested_agents = config['auto_parallel_cap'] if config['max_parallel_agents'] == 'auto' else config['max_parallel_agents']
+    controller_id = data.get('resource_controller')
+    if controller_id is not None:
+        identifier(controller_id, 'resource_controller')
+        module_spec = importlib.util.spec_from_file_location(
+            'auto_test_resource_admission', Path(__file__).with_name('resource_controller.py'))
+        controller = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(controller)
+        state = controller.read_admission(project, controller_id)
+        decision = state['decision']
+        shared_capacity = max(0, decision['desired_subagents']
+                              - (global_active['agents'] - active['agents'])
+                              - other_usage['agents'])
+        effective = {'agents': min(requested_agents, shared_capacity),
+                     'browsers': config['browser_parallel_cap'] if kind == 'ui' else 0,
+                     'playwright_workers': config['playwright_workers']}
+        if kind == 'ui':
+            effective['playwright_workers'] = min(effective['playwright_workers'], effective['browsers'])
+        paused = decision['admission_paused'] or facts['pressure']
+        if paused:
+            effective = dict.fromkeys(effective, 0)
+        return {'test_kind': kind, 'requested': {
+                    'agents': requested_agents, 'browsers': config['browser_parallel_cap'],
+                    'playwright_workers': config['playwright_workers']},
+                'configuration': config, 'configuration_sources': config_sources,
+                'effective': effective,
+                'available': {key: max(0, value - active[key]) for key, value in effective.items()},
+                'limits': {'agents': {'controller_subagents': decision['desired_subagents']}},
+                'resource_facts': facts, 'resource_sources': fact_sources,
+                'admission_paused': paused, 'existing_leases_revoked': False,
+                'resource_controller': {'controller_id': controller_id,
+                                        'measurement': state['measurement'],
+                                        'decision': decision, 'updated_at': state['updated_at']},
+                'quota': quota_view(ledger)}
     cpus = facts['available_cpus']
     cpu_agents = max(1, math.floor(cpus / 2)) if cpus else (0 if cpus == 0 else 1)
     cpu_browsers = max(1, math.floor(cpus)) if cpus else (0 if cpus == 0 else 1)
+    cpu_agents = max(0, cpu_agents - (global_active['agents'] - active['agents'])
+                     - other_usage['agents'])
     slots = facts['available_agent_slots']
     slots = 1 if slots is None else slots
     lanes = facts['independent_tasks']
@@ -304,6 +345,8 @@ def budget(project, data, ledger, independent=None):
     memory = facts['available_memory_bytes']
     active_api_workers = sum(lease['quota']['playwright_workers'] for lease in ledger['leases'].values()
                              if lease['status'] == 'active' and lease['task'].get('test_kind', 'ui') == 'api')
+    active_api_workers += sum(task['quota']['playwright_workers'] for task in unreserved
+                              if task.get('test_kind', 'ui') == 'api')
     # Reservations may not have materialized as processes yet. Charge all active
     # reservations conservatively; repeated snapshots must not mint capacity.
     memory_cap = (max(0, (memory - RESERVE_BYTES - active_api_workers * API_WORKER_BYTES) // BROWSER_BYTES)
@@ -311,7 +354,7 @@ def budget(project, data, ledger, independent=None):
     limits = {
         'agents': {'requested': requested_agents, 'cpu': cpu_agents,
                    'slots': active['agents'] + slots, 'independent_tasks': active['agents'] + agent_lanes},
-        'browsers': {'requested': config['browser_parallel_cap'], 'cpu': cpu_browsers, 'memory': memory_cap,
+        'browsers': {'requested': config['browser_parallel_cap'], 'cpu': max(0, cpu_browsers - active_api_workers), 'memory': memory_cap,
                      'independent_tasks': active['browsers'] + browser_lanes},
     }
     # Unknown CPU or memory starts at ONE total browser, not one per invocation.
@@ -319,20 +362,18 @@ def budget(project, data, ledger, independent=None):
         limits['browsers']['unknown_cpu'] = 1
     effective = {key: min(values.values()) for key, values in limits.items()}
     effective['playwright_workers'] = min(config['playwright_workers'], effective['browsers'])
-    task_values = data.get('tasks', {})
-    task_values = task_values.values() if isinstance(task_values, dict) else task_values
-    api_workers = request_kind(project, data) == 'api' or any(
-        isinstance(task, dict) and task.get('test_kind') == 'api' for task in task_values)
-    if api_workers:
-        worker_memory = max(0, (memory - RESERVE_BYTES - active['browsers'] * BROWSER_BYTES)
-                            // API_WORKER_BYTES) if memory is not None else max(0, 1 - active['browsers'])
-        worker_memory += active['playwright_workers'] - active_api_workers
+    if kind == 'api':
+        other_browsers = global_active['browsers'] + other_usage['browsers']
+        worker_memory = max(0, (memory - RESERVE_BYTES - other_browsers * BROWSER_BYTES)
+                            // API_WORKER_BYTES) if memory is not None else max(0, 1 - other_browsers)
         effective['playwright_workers'] = min(config['playwright_workers'],
-                                               cpu_browsers, worker_memory)
+                                               max(0, cpu_browsers - other_browsers), worker_memory)
+        effective['browsers'] = 0
     if facts['pressure']:
         effective = dict.fromkeys(effective, 0)
     available = {key: max(0, value - active[key]) for key, value in effective.items()}
-    return {'requested': {'agents': requested_agents, 'browsers': config['browser_parallel_cap'],
+    return {'test_kind': kind,
+            'requested': {'agents': requested_agents, 'browsers': config['browser_parallel_cap'],
                           'playwright_workers': config['playwright_workers']},
             'configuration': config, 'configuration_sources': config_sources,
             'effective': effective, 'available': available, 'limits': limits,
@@ -450,7 +491,7 @@ def eligibility(task, tasks, occupied, run_id):
     return reasons
 
 
-def context(project, data, ledger):
+def context(project, data, ledger, kind=None):
     run_id = identifier(data.get('run_id'), 'run_id')
     tasks = tasks_from_input(project, data)
     occupied = [{'run_id': lease['run_id'], 'task': lease['task']}
@@ -460,18 +501,22 @@ def context(project, data, ledger):
         if task['status'] == 'running' and not any(i['run_id'] == run_id and i['task']['task_id'] == task['task_id'] for i in occupied):
             occupied.append({'run_id': run_id, 'task': task})
             unreserved.append(task['task_id'])
-    candidates = [t for t in tasks.values() if not eligibility(t, tasks, occupied, run_id)]
+    kind = kind or request_kind(project, data)
+    candidates = [t for t in tasks.values() if t.get('test_kind', 'ui') == kind
+                  and not eligibility(t, tasks, occupied, run_id)]
     independent_tasks = []
     for task in candidates:
         if not any(conflicts(task, prior) for prior in independent_tasks):
             independent_tasks.append(task)
-    unreserved_usage = {key: sum(tasks[tid]['quota'][key] for tid in unreserved) for key in QUOTAS}
+    unreserved_usage = {key: sum(tasks[tid]['quota'][key] for tid in unreserved
+                                if tasks[tid].get('test_kind', 'ui') == kind) for key in QUOTAS}
     # A greedy alternative with smaller demand must not prevent acquiring a
     # different, individually eligible multi-worker task.
     independent = tuple(max(sum(t['quota'][key] for t in independent_tasks),
                             max((t['quota'][key] for t in candidates), default=0)) + unreserved_usage[key]
                         for key in ('agents', 'browsers'))
-    result = budget(project, data, ledger, independent)
+    result = budget(project, dict(data, test_kind=kind), ledger, independent,
+                    [tasks[tid] for tid in unreserved])
     result['unreserved_running_tasks'] = unreserved
     result['unreserved_running_quota_estimate'] = unreserved_usage
     result['available'] = {key: max(0, value - unreserved_usage[key])
@@ -486,18 +531,26 @@ def capacity_reasons(task, remaining):
 
 def ready(project, data, ledger):
     run_id, tasks, occupied, result = context(project, data, ledger)
-    remaining = dict(result['available'])
+    budgets = {result['test_kind']: result}
+    for task in tasks.values():
+        kind = task.get('test_kind', 'ui')
+        if kind not in budgets:
+            budgets[kind] = context(project, data, ledger, kind)[3]
+    virtual = dict(ledger, leases=dict(ledger['leases']))
     selected, blocked = [], {}
     for tid, task in tasks.items():
+        current = context(project, data, virtual, task.get('test_kind', 'ui'))[3]
+        remaining = current['available']
         reasons = eligibility(task, tasks, occupied, run_id) + capacity_reasons(task, remaining)
         if reasons:
             blocked[tid] = reasons
         else:
             selected.append(tid)
             occupied.append({'run_id': run_id, 'task': task})
-            for key in remaining:
-                remaining[key] -= task['quota'][key]
+            virtual['leases']['advisory-' + tid] = {
+                'run_id': run_id, 'task': task, 'quota': task['quota'], 'status': 'active'}
     return {'run_id': run_id, 'ready': selected, 'blocked': blocked, 'budget': result,
+            'budgets_by_kind': budgets,
             'selection': 'input_order_greedy_advisory_acquire_rechecks'}
 
 
@@ -542,9 +595,10 @@ def locked_ledger(project):
 
 
 def acquisition(project, data, ledger):
-    run_id, tasks, occupied, result = context(project, data, ledger)
     tid = identifier(data.get('task_id'), 'task_id')
+    tasks = tasks_from_input(project, data)
     check(tid in tasks, 'task_id not found in tasks')
+    run_id, tasks, occupied, result = context(project, data, ledger, tasks[tid].get('test_kind', 'ui'))
     task = tasks[tid]
     owner = data.get('owner')
     check(isinstance(owner, str) and owner, 'owner is required')
@@ -575,7 +629,8 @@ def acquisition(project, data, ledger):
     for key in QUOTAS:
         ledger['peak'][key] = max(ledger['peak'][key], active[key])
     result['quota'] = quota_view(ledger)
-    result['available'] = {key: max(0, value - active[key] - result['unreserved_running_quota_estimate'][key])
+    kind_active = counts(ledger['leases'].values(), result['test_kind'])
+    result['available'] = {key: max(0, value - kind_active[key] - result['unreserved_running_quota_estimate'][key])
                            for key, value in result['effective'].items()}
     return {'acquired': True, 'idempotent': False, 'lease': lease, 'budget': result}, True
 

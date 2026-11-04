@@ -528,6 +528,60 @@ class ApiSchedulingTest(unittest.TestCase):
         self.assertEqual(result['lease']['quota']['browsers'], 0)
         self.assertEqual(result['lease']['quota']['playwright_workers'], 2)
 
+    def test_worker_and_agent_caps_are_independent_in_both_directions(self):
+        for first_index, second_index in ((0, 1), (1, 0)):
+            first_kind, second_kind = ('ui', 'api')[first_index], ('ui', 'api')[second_index]
+            first = self.request(first_kind, conflict=first_kind)
+            second = self.request(second_kind, conflict=second_kind)
+            for request in (first, second):
+                request['concurrency'] = {'max_parallel_agents': 1, 'playwright_workers': 1}
+            leases = []
+            try:
+                first_result = sc.execute('acquire', self.projects[first_index], first)
+                self.assertTrue(first_result['acquired'])
+                leases.append((first_index, first_result['lease']))
+                second_result = sc.execute('acquire', self.projects[second_index], second)
+                self.assertTrue(second_result['acquired'], second_result)
+                leases.append((second_index, second_result['lease']))
+                self.assertEqual(second_result['budget']['available']['playwright_workers'], 0)
+                self.assertEqual(second_result['budget']['quota']['active']['playwright_workers'], 2)
+                for kind in ('ui', 'api'):
+                    self.assertEqual(second_result['budget']['quota']['active_by_kind'][kind]['playwright_workers'], 1)
+                extra = self.request(second_kind, conflict='other-resource')
+                extra.update(run_id=second_kind + '-other', concurrency=second['concurrency'])
+                blocked = sc.execute('acquire', self.projects[second_index], extra)
+                self.assertFalse(blocked['acquired'])
+                self.assertTrue(any(reason['kind'] == 'quota' for reason in blocked['reasons']))
+            finally:
+                for index, lease in leases:
+                    sc.execute('release', self.projects[index], {
+                        'lease_id': lease['lease_id'], 'release_token': lease['release_token']})
+
+    def test_legacy_ui_lease_keeps_signature_and_api_gets_separate_capacity(self):
+        ui = sc.execute('acquire', self.projects[0], self.request('ui', conflict='ui-only'))
+        self.assertNotIn('test_kind', ui['lease']['task'])
+        api = self.request('api', conflict='api-only')
+        api['concurrency'] = {'max_parallel_agents': 1, 'playwright_workers': 1, 'browser_parallel_cap': 0}
+        self.assertTrue(sc.execute('acquire', self.projects[1], api)['acquired'])
+        self.assertTrue(sc.execute('acquire', self.projects[0], self.request('ui', conflict='ui-only'))['idempotent'])
+
+    def test_mixed_ready_uses_each_task_kind_without_splitting_conflicts(self):
+        request = self.request('ui', conflict='ui-only')
+        request['concurrency'] = {'max_parallel_agents': 1, 'playwright_workers': 1}
+        request['tasks']['API'] = dict(self.request('api', conflict='api-only')['tasks']['T1'], test_kind='api')
+        ready = sc.execute('ready', self.projects[0], request)
+        self.assertEqual(ready['ready'], ['T1', 'API'])
+        first = sc.execute('acquire', self.projects[0], request)
+        self.assertTrue(first['acquired'])
+        request['task_id'] = 'API'
+        second = sc.execute('acquire', self.projects[0], request)
+        self.assertTrue(second['acquired'], second)
+        request['tasks']['other-api'] = dict(request['tasks']['API'], conflict_keys=['ui-only'])
+        request['task_id'] = 'other-api'
+        denied = sc.execute('acquire', self.projects[0], request)
+        self.assertFalse(denied['acquired'])
+        self.assertTrue(any(reason['kind'] == 'conflict_keys' for reason in denied['reasons']))
+
     def test_api_workers_respect_existing_browser_memory_reservation(self):
         ui = self.request('ui', conflict='ui-only')
         self.assertTrue(sc.execute('acquire', self.projects[0], ui)['acquired'])

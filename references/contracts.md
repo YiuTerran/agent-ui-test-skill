@@ -239,6 +239,8 @@ report返回summary、report_bundles、可选merged_report、report_consistency�
 
 均为本地Python3.10+标准库辅助，不启动Agent或产品测试；日常不与workflow组合入口重复执行。
 
+preflight接收完整Playwright发现文件后，按内容SHA-256在本run的discovery目录保存原始字节快照；full计划绑定快照路径和摘要。项目runner可继续复用自己的临时发现文件，历史Attempt仍使用各自快照核验，source_path仅记录调用来源。
+
 ### 双预算与就绪任务
 
 入口：`python3 <skill>/scripts/scheduling.py {budget,ready,acquire,release,reap} --project PATH --input REQUEST.json`。项目所有run/CLI共享`test/.cache/scheduling`锁定账本。
@@ -247,6 +249,7 @@ report返回summary、report_bundles、可选merged_report、report_consistency�
 | --- | --- |
 | config_path | 请求顶层可选字段；默认`test/spec.md`，字符串为项目内相对Markdown路径，读取其中唯一的workflow-config块；明确直接执行时可显式传null，不读取配置文件，使用默认值及请求的concurrency覆盖，避开无关同名文档 |
 | resources | available_cpus、available_memory_bytes、available_agent_slots、independent_tasks、pressure，未知null；尽力探测CPU/内存，Agent空槽由宿主提供 |
+| resource_controller | 动态模式必填的controller_id；读取同coordination根、同宿主的新鲜控制状态，高压/未知暂停新增，跨UI/API共享执行者容量。缺失/停止/过期拒绝，不降级到估算；接口见[定时资源控制](resource-control.md) |
 | tasks[task_id] | phase/status/owner/dependencies/writable_paths/conflict_keys/case_ids/isolation；readable_paths可选，缺省[]；实际传递fixture/helper/配置/认证输入由执行者声明 |
 | isolation | 核实隔离用verified；无写集也填[]。未知只在自己isolation_group/case范围串行，无范围则保守串行 |
 | quota | agents/exploration_browsers/playwright_workers；CLI workers等于实际--workers。UI worker计浏览器，API worker只计执行CPU/内存预算；任务test_kind覆盖请求/当前suite类型，API的exploration为代码阅读 |
@@ -255,7 +258,9 @@ report返回summary、report_bundles、可选merged_report、report_consistency�
 
 异常退出后使用既有`reap`核实回收条件，不手改quota账本。配额回收仅解除本地调度占用，不证明测试创建的业务资源已清理；项目fixture的锁、身份池和资源残留分别核验，清理证据继续走原有资源事件与派发门禁。
 
-config_path只选择调度配置和默认test_kind，不改变规范工作流元数据及coordination根目录；显式null时类型可由请求test_kind给出，缺省UI。规范配置的coordination.root决定共享配额、身份池及残留索引；缺省本工程。各工程保持自己的PROJECT，不通过config_path、更换目录或切root拆分安全状态，见[资源协调](suites-and-cases.md#资源协调)。browser_parallel_cap可为0，纯API仍受worker预算约束；API worker每个约256MiB是预算估计，不是服务并发或实测内存承诺。
+config_path只选择调度配置和默认test_kind，不改变规范工作流元数据及coordination根目录；显式null时类型可由请求test_kind给出，缺省UI。规范配置的coordination.root决定共享配额账本、身份池及残留索引；缺省本工程。账本内UI与API的Agent和playwright_workers分别计数、分别应用concurrency上限，缺省类型的历史租约按UI处理；task.test_kind决定混合任务的配额归属，ready返回budgets_by_kind，budget返回当前test_kind，quota.active_by_kind保留分类占用。跨类型conflict_keys、读写集、身份和残留门禁继续共享；整机资源估计仍考虑两类占用。各工程保持自己的PROJECT，见[资源协调](suites-and-cases.md#资源协调)。browser_parallel_cap可为0，纯API仍受自身worker预算约束；API worker每个约256MiB是预算估计，不是服务并发或实测内存承诺。
+
+上述固定CPU/内存估算仅用于未接入动态控制的旧runner。绑定resource_controller后，以实测压力及desired_subagents控制共同容量，agents计领取工作包的执行者，不计纯协调主Agent；保留租约防止并发启动竞争及维护资源冲突。ready对本轮选中任务模拟占用后再选择下一项，避免同一共享余量被不同类型重复使用。
 
 ```json
 {"run_id":"RUN","owner":"worker-a","owner_pid":12345,"task_id":"explore-a",
