@@ -47,6 +47,7 @@ description: Build and maintain requirement-driven UI and HTTP API automation wi
 | 已部署再跑、只回归、不新增、跳过前置直接跑 | 锁定目标→一次发现校验→执行→结果与清理；沿用既有预期 | [确定性任务](references/workflow.md#确定性任务直接完成) |
 | 确认需求是否变更 | 当前来源快检→同口径比较→报告变化或无法确认 | [确定性任务](references/workflow.md#确定性任务直接完成) |
 | 分析失败报告、优化失败测试 | 复用失败证据→区分测试与产品缺陷→修复测试工具并验证；业务缺陷登记报告，另行获准修复且环境更新后再复测 | [按报告修复](references/workflow.md#按报告修复快车道) |
+| 清理服务端残留、恢复中断清理 | 复用项目恢复入口→盘点原授权范围→连续清理与对账→独立sweep | [清理快车道](references/cleanup.md#清理快车道) |
 
 未指定路径的“开始测试”默认已有回归；尚无测试体系时先引导接入，不推定用户批准全部新增覆盖。新增范围尚未明确时才请用户选择。混合请求按实际依赖衔接，用户已确认的范围直接复用。执行回归保留身份、数据安全和原始结果证据；需求验收再核对来源有效性及覆盖资格。只读取当前路径需要的参考章节，不一次加载所有契约和脚本实现。
 
@@ -62,6 +63,8 @@ description: Build and maintain requirement-driven UI and HTTP API automation wi
 - **恢复与结束**：用真实checkpoint/会话接回未完成步骤；通过步骤在输入未变时复用。用户选择增量续跑时，按[断点完成标准](references/checkpoints.md#增量任务的完成标准)收尾，不为formal full字段另跑全量；执行完成、产品全部通过和需求全覆盖分别判断。组合命令成功即交付，不再跑status、逐case扫描、资源副本遍历或重新生成报告。失败先暂停受影响派发并保留安全清理所需占用，由主Agent按自修复路径恢复；能自行解决就续跑，不以“已记录阻塞”代替完成任务。确实无法推进时才交付出错阶段、证据和所需外部动作。
 
 长回归优先复用项目已有恢复能力，按需接入[断点调度与有限工作包](references/checkpoints.md)。sidecar仅用于兼容其单次结果模型的suite，保留项目原有retry/repeatEach语义；未接入时沿用原生结果、配额及残留门禁，不声称逐case断点复用。有明确诊断和修复进展就继续修复测试工具；同根因、同输入和环境且无新证据时转诊断。输入变更只失效相关观察，增量恢复与正式full验收分开。
+
+fixture新增或修改失败清理、配置恢复、缺席判定及敏感响应处理时，复用等价离线测试或接入[fixture行为契约探针](references/fixture-contracts.md)，直接调用项目真实实现并在失败时阻断相关派发。按职责选择适用契约，不以自报通过字段代替实际请求与状态验证；业务写入后的残留门禁仍独立执行。
 
 ## 进度汇报
 
@@ -108,7 +111,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 既有业务数据默认只读，共享数据按准确owned证明逆依赖清理；未知创建结果不重试、不猜测删除。用户明确授权整体重置的独占数据域，按获准resource kinds及当前完整盘点执行reset，旧unknown缺逐条receipt不阻挡此恢复路径；保留用户确认的准确保护基线；项目确认的共享/系统数据域禁止reset，不从域名或ID推定隔离性。日常case cleanup与轮末独立scope sweep均实际执行，reset仅凭完整scope absence及实际cleanup_state桥接关闭相关unknown/残留；停源、互斥、分页、依赖及retained规则见[清理与专用域reset](references/cleanup.md)。范围内共享配置按原值恢复并回读，见[测试身份与共享配置](references/browser-and-auth.md#测试身份与共享配置)。
 - 清理未决立即通过checkpoint的`cleanup_state`增量登记跨run索引，按稳定环境、kind、准确ID去重，阻断相关写资源包和后续claim；明确只读或无相关资源依赖的case继续。恢复前核对[项目资源恢复契约](references/cleanup.md#项目资源恢复契约)中的身份、应用上下文及逐kind缺席语义，再凭匹配资源的absence/retained_verified回读证据恢复，不以test passed、close或普通unblock解除。报告分别列单轮残留、历史累计和本轮清理数量；错误msg先脱敏，见[跨run残留门禁](references/checkpoints.md#跨run残留门禁)。
 - 所有runner启动产品CLI前必须通过残留门禁：使用checkpoint的重新claim，或调用`checkpoint.py gate`并检查退出码。`workflow attempt-init`本身不读取残留索引，非checkpoint runner必须在pre-dispatch接入gate；未知写scope在已有残留时fail closed，明确readonly可继续。升级脚本、生成工作包或成功attempt-init均不代表已接入。
-- 独立case并行、共享资源按环境/账号/组织/配置/数据冲突组局部串行。Agent并发按[定时资源控制](references/resource-control.md)调整：默认30秒采样，CPU或内存达到80%每轮排空一个最新sub，两项低于60%有任务和槽位时增加一个，最低1主1sub；高压或采样未知暂停新增case。减员完成当前case及cleanup后退出，不强杀。执行前领取容量/冲突配额，teardown后释放；动态模式跨UI/API共享实测容量，API worker不自动占浏览器。跨工程共用资源配置同一coordination.root、controller及冲突键；旧runner未接入时不声称定时扩缩容。
+- 独立case及fixture内无依赖任务并行，共享资源按环境/账号/组织/配置/数据冲突组局部串行。Agent、case、独立sweep及内部I/O队列按[定时资源控制](references/resource-control.md)共享实测预算、分层扩缩，内部池不按case数量乘倍。默认30秒采样，CPU或内存达到80%暂停新增业务并逐步排空，两项低于60%且有任务和真实容量时扩容；缩容保留在途任务、命令回复及owned清理的推进能力，不强杀。实际领取容量与Attempt计划一致，teardown后释放；动态Agent模式跨UI/API共享实测容量，API worker不自动占浏览器。跨工程共用资源配置同一coordination.root、controller及冲突键；按实际接入层次报告扩缩容，不能只增加执行者数量便声称内部任务已经动态并行。
 - 工作流新run的`native_merge_required=true`：每个结果bundle必须绑定当前schema的Attempt计划及摘要、原始JSON和blob，正常同时生成HTML；完整绑定Setup、业务case、retry及未执行结果，最终合并全部结果blob并核验。直接执行的原始结果单独交付，不冒充已登记bundle或需求验收。中断产物不齐的调用独立登记仅回执，不计结果或完整性。JSON-only保留为旧run的受限兼容路径。失败、重跑后通过及未执行置前，不以缺失证据推断通过。
 - 新Attempt仅允许追加固定reporter/output参数，执行选择条件进入计划command。新run的完整验收必须满足`regression_completeness=complete`，覆盖绑定完整发现清单的收尾full及全部目标/分片；业务结果另行核验。缺少计划、full或目标时阻止完整验收，`not_declared`仅用于旧run；完整发现声明仍需真实命令审阅。
 - 默认每轮执行前回收相关模块旧报告；跨run续跑先显式保护仍被复用的原生产物，无法完整声明依赖时通过项目配置关闭自动回收，见[断点证据保护](references/checkpoints.md#跨run证据与回收)。只自动删除缓存白名单内安全归属明确的产物，保护当前run、有效审批/baseline及未核清资源恢复证据。回收记录不能改写历史结论。
@@ -121,12 +124,13 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 事件字段、CLI、平台和缓存回收契约：[契约](references/contracts.md)
 - Playwright输出、绑定、报告合并：[报告绑定](references/reports.md)
 - 实际ego-lite、认证和人工等待：[浏览器与认证](references/browser-and-auth.md)及当前安装的ego-browser技能
-- 实测资源采样、Agent扩缩容及宿主adapter：[定时资源控制](references/resource-control.md)
+- 实测资源采样、各层任务扩缩容及宿主adapter：[定时资源控制](references/resource-control.md)
 - 统一预检、事件预校验、Attempt模板和耗时：[本地辅助入口](references/local-tools.md)
 
 内部工具按需调用，字段见[契约](references/contracts.md#提速辅助脚本)：
 - `scripts/scheduling.py acquire|release`：实际探索/CLI前领取共享配额，teardown后释放
 - `scripts/resource_controller.py sample|step|watch`：实测CPU/内存，定时决策并通过宿主adapter安全增减Agent
+- `scripts/task_pool.py watch|hold`与`assets/task-pool-client.mjs`：在已领取预算内落实case、sweep及叶子I/O的跨进程共享准入；按[接入指引](references/resource-control.md#项目接入任务池)修改实际派发位置并验证，安装本身不启用项目并发
 - `scripts/source_cache.py capture|verify`：新来源导出后留指纹清单，后续有新观察时校验复用
 - `scripts/retention.py plan|apply`：手动预览/恢复；日常回归已由prepare-regression组合调用
 

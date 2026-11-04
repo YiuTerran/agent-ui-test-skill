@@ -14,6 +14,8 @@ UI/API使用相同辅助入口，API不要求浏览器；新工程用`init --kin
 
 独立入口`resource_controller.py sample|step|watch`用psutil实测CPU/内存，默认30秒检查、80%减员、60%以下扩容，最低1主1sub。watch经显式宿主adapter自动启动或排空其拥有的sub，step供主Agent接宿主原生工具；均不强杀运行中的任务。动态派发请求须绑定resource_controller，状态失效时暂停新增。依赖、完整输入、幂等adapter及安全收尾见[定时资源控制](resource-control.md)；此入口的可选psutil依赖和adapter执行是本页标准库辅助工具之外的明确例外。
 
+项目内部并发使用独立入口`task_pool.py watch|hold`或其`Monitor/Pool`库接口，配套Node客户端位于`assets/task-pool-client.mjs`。它把已领取容量落实为跨进程case/sweep任务槽、全阶段共享I/O槽及回复保留槽，动态缩容采用自然排空。项目需要实际改runner、fixture及请求/协议叶子操作，接入顺序、CLI协议、失效处理和离线测试见[项目接入任务池](resource-control.md#项目接入任务池)；该脚本不代领配额或清理数据。
+
 ## 确定性批量入口
 
 ### 一次采集
@@ -106,6 +108,12 @@ python3 "$SKILL_DIR/scripts/fixture_lock_probe.py" --project "$PROJECT" --input 
 `RUNNER`替换为项目真实启动入口；检查应在该入口的产品CLI spawn之前接入，或由runner调用脚本并检查真实退出码。失败exit2，含`valid:false/stage/error_type/checks`，停止依赖该锁的派发；不能捕获后继续。成功exit0，含逐阶段checks、分配数量及绑定命令/声明输入hash/参数的`adapter_fingerprint`，不登记业务结果或解除残留门禁。检查前后核对inputs字节未变。实际锁实现、分配逻辑、adapter、运行时、cwd或继承环境变化后重检；fingerprint不自动枚举依赖或证明runner已接入，项目自行确保声明完整与复用条件成立。
 
 首次接入离线验证“adapter缺失、锁检查失败均不会启动产品CLI”。多种独立锁分别配置和检查；无跨进程fixture锁时不要求接入。不兼容此协议的既有等价契约测试可继续使用，但须实际覆盖上述行为并绑定真实实现，不用本仓库自身的内核锁单测充当项目接入证明。
+
+## fixture行为契约检查
+
+`fixture_contract_probe.py`通过受控本地HTTP服务和项目真实fixture adapter，核对部分初始化/清理失败、配置恢复及结案重入、隐藏列表/拒绝访问/分页不完整的缺席误判，并扫描合成secret的输出与产物泄漏。输入可按fixture职责选择适用组，声明adapter及真实实现文件；命令、HTTP协议、规范化账本及边界见[fixture离线行为契约](fixture-contracts.md)。
+
+脚本默认仅探测，exit0/2；可用`--run <项目runner argv...>`形成实际启动门禁，每次重新探测，失败不会spawn runner，成功才透传runner退出码和输出。不会拿历史成功JSON放行、生成业务结果或关闭真实残留。目标项目仍需将门禁接入实际入口，安装脚本不等于已接入。
 
 ## 统一预检
 
