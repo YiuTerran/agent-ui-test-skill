@@ -137,10 +137,13 @@ class ControllerTest(unittest.TestCase):
             (self.root / (row['id'] + '.drain')).touch()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if all((self.root / (row['id'] + '.cleanup')).exists() for row in rows):
+            cleaned = all((self.root / (row['id'] + '.cleanup')).exists() for row in rows)
+            exited = sys.platform != 'win32' or all(
+                rc.scheduling.pid_state(row['pid']) == 'dead' for row in rows)
+            if cleaned and exited:
                 return
             time.sleep(.02)
-        self.fail('disposable worker did not complete cleanup')
+        self.fail('disposable worker did not complete cleanup or release process handles')
 
     def test_watch_grows_then_drains_real_subprocesses(self):
         outputs = []
