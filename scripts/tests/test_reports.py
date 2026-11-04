@@ -318,6 +318,84 @@ class ReportTest(unittest.TestCase):
                             facts({"status": "failed", "errors": native["errors"]}))
         self.assertNotEqual(facts(raw), facts({"status": "passed", "errors": []}))
 
+    def test_skipped_zero_and_native_negative_duration_have_equal_slots(self):
+        signature = wf.report_artifacts.signature
+        raw = dict(startTime='2026-01-01T00:00:00Z', retry=0, status='skipped', duration=0)
+        args = ('Synthetic C1', 'chromium', 'C1.spec.ts', 'skipped')
+        self.assertEqual(signature(*args, [raw]), signature(*args, [dict(raw, duration=-1)]))
+        for changed in [dict(duration=1), dict(duration=None),
+                        dict(status='passed'), dict(retry=1),
+                        dict(startTime='2026-01-01T00:00:01Z')]:
+            self.assertNotEqual(signature(*args, [raw]), signature(*args, [dict(raw, **changed)]))
+        for status in ['passed', 'failed', 'timedOut', 'interrupted']:
+            self.assertNotEqual(signature(*args, [dict(raw, status=status)]),
+                                signature(*args, [dict(raw, status=status, duration=-1)]))
+
+    def test_collect_and_merge_skipped_sentinels_preserve_raw_evidence(self):
+        self.start()
+        self.check_sources()
+        bundle, raw = self.collectable()
+        test = raw['suites'][0]['specs'][0]['tests'][0]
+        test['status'] = 'skipped'
+        test['results'][0].update(status='skipped', duration=0)
+        raw['stats'].update(expected=0, skipped=1)
+        self.write(bundle['execution_result'], raw)
+        original = (self.project / bundle['execution_result']).read_bytes()
+        def native_sentinel(index, tests):
+            tests[0]['results'][0]['duration'] = -1
+        self.html(bundle, raw, mutate=native_sentinel)
+        self.add_blob(bundle)
+        self.assertTrue(self.collect(bundle)['collection']['complete'])
+        self.record(self.merged(bundle, raw, mutate=native_sentinel))
+        summary = self.report()
+        self.assertEqual('checked', summary['report_consistency']['status'])
+        self.assertEqual(1, summary['counts']['execution_results']['skip'])
+        self.assertEqual(original, (self.project / bundle['execution_result']).read_bytes())
+        before = self.state()
+        test['results'][0]['duration'] = -1
+        self.write(bundle['execution_result'], raw)
+        self.cli('report', '--run', self.run, '--owner', self.owner, fail=True)
+        after = self.state()
+        for key in ('report_bundles', 'merged_report', 'executions', 'events'):
+            self.assertEqual(before[key], after[key])
+
+    def test_non_skipped_duration_mismatch_rejected_at_registration_and_merge(self):
+        self.start()
+        self.check_sources()
+        bundle, raw = self.collectable()
+        def wrong_duration(index, tests):
+            tests[0]['results'][0]['duration'] = -1
+        self.html(bundle, raw, mutate=wrong_duration)
+        before = self.state()
+        self.collect(bundle, fail=True)
+        self.assertEqual(before, self.state())
+        self.html(bundle, raw)
+        self.add_blob(bundle)
+        self.collect(bundle)
+        before = self.state()
+        self.record(self.merged(bundle, raw, mutate=wrong_duration), fail=True)
+        self.assertEqual(before, self.state())
+
+    def test_skipped_sentinel_does_not_hide_changed_duration_or_error_details(self):
+        self.start()
+        self.check_sources()
+        bundle, raw = self.collectable()
+        test = raw['suites'][0]['specs'][0]['tests'][0]
+        test['status'] = 'skipped'
+        test['results'][0].update(status='skipped', duration=0,
+                                  errors=[{'message': 'retained skip detail'}])
+        raw['stats'].update(expected=0, skipped=1)
+        self.write(bundle['execution_result'], raw)
+        self.html(bundle, raw)
+        self.add_blob(bundle)
+        self.collect(bundle)
+        before = self.state()
+        for changes in ({'duration': 1}, {'duration': -2}, {'duration': -1, 'errors': []}):
+            def changed_result(index, tests):
+                tests[0]['results'][0].update(changes)
+            self.record(self.merged(bundle, raw, mutate=changed_result), fail=True)
+            self.assertEqual(before, self.state())
+
     def test_native_merge_requires_all_attempts_and_publishes_one_entry(self):
         self.start()
         self.check_sources()
