@@ -87,7 +87,9 @@ def signature(title, project, file, outcome, results):
     if platform_support.WINDOWS:
         normalized = normalized.casefold()
     return (title, project, normalized, outcome,
-            tuple((r.get('startTime'), r.get('retry', 0), r.get('status'), r.get('duration'))
+            tuple((r.get('startTime'), r.get('retry', 0), r.get('status'),
+                   0 if r.get('status') == 'skipped' and type(r.get('duration')) is int
+                   and r['duration'] in (-1, 0) else r.get('duration'))
                   for r in results))
 
 
