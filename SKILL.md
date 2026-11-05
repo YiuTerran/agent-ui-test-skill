@@ -120,6 +120,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 ## 按需参考
 
 - 输入准备、恢复与覆盖补全：[工作流](references/workflow.md)
+- API新增与补全：按[覆盖设计](references/api-coverage.md)逐接口核对正负例、普通分支、动态代表组合及跨服务旅程；用`scripts/api_coverage.py`校验计划、实现、发现与可用的OpenAPI差集
 - case清理、轮末sweep及已授权专用域reset：[清理](references/cleanup.md)
 - 事件字段、CLI、平台和缓存回收契约：[契约](references/contracts.md)
 - Playwright输出、绑定、报告合并：[报告绑定](references/reports.md)

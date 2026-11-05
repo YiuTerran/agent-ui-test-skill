@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "suite_id": "joint-api",
+  "sources": [
+    {"source_id": "REQ", "kind": "requirements", "revision": "example-v1", "fingerprint": "example-requirements", "locations": ["example-requirements.md#command-lifecycle"]},
+    {"source_id": "CODE", "kind": "backend_code", "revision": "example-commit", "fingerprint": "example-code", "locations": ["commands/SendService.java", "records/QueryService.java"]}
+  ],
+  "inventory": {
+    "method": "Review scoped routes, DTO validation, service decisions, repository effects and downstream consumers.",
+    "services": ["commands", "records"],
+    "included": ["commands:POST:/commands", "records:GET:/records/{commandId}"],
+    "excluded": [],
+    "backend_code_access": true,
+    "cross_service_assessment": {"status": "covered"}
+  },
+  "endpoints": [
+    {
+      "endpoint_id": "commands:POST:/commands",
+      "service": "commands",
+      "method": "POST",
+      "path": "/commands",
+      "source_ids": ["REQ", "CODE"],
+      "positive_scenarios": [
+        {"scenario_id": "send-sync", "expected": "A valid synchronous command is delivered and its result persisted.", "assertions": ["HTTP and business success", "Device receives exact typed payload", "Stored result correlates to commandId"], "case_ids": ["SEND-SYNC"]},
+        {"scenario_id": "send-limit", "expected": "The inclusive payload boundary is accepted asynchronously.", "assertions": ["Accepted response", "Exact boundary value reaches device", "Result eventually visible by commandId"], "case_ids": ["SEND-LIMIT"]},
+        {"scenario_id": "send-interaction", "expected": "Synchronous delivery also accepts the inclusive boundary.", "assertions": ["Synchronous result", "Boundary value is preserved"], "case_ids": ["SEND-INTERACTION"]}
+      ],
+      "negative_scenarios": [
+        {"scenario_id": "send-invalid", "category": "validation", "expected": "A value outside the declared model is rejected.", "assertions": ["Specific validation code", "No device command and no persisted result within the observation budget"], "case_ids": ["SEND-INVALID"]}
+      ],
+      "negative_review": {
+        "method": "Example excerpt: assess applicable rejection families and their guard order.",
+        "status": "partial",
+        "reason": "Example omits authorization and target-state tests; expand using actual code and contracts.",
+        "categories": [
+          {"category": "validation", "disposition": "covered", "scenario_ids": ["send-invalid"]},
+          {"category": "authorization", "disposition": "blocked", "reason": "Add denied-identity cases for the real project."},
+          {"category": "state", "disposition": "blocked", "reason": "Add unavailable-target cases for the real project."}
+        ]
+      },
+      "branch_assessment": {"completeness": "partial", "method": "Example excerpt of DTO and dispatch decisions.", "source_ids": ["CODE"], "reason": "Inventory all actual guards, alternatives and observable effects before declaring completeness."},
+      "branches": [
+        {"branch_id": "sync", "description": "Synchronous delivery", "reachability": "Authenticated caller, available target, valid model and mode=sync.", "source_ids": ["CODE"], "outcome": "positive", "disposition": "covered", "scenario_ids": ["send-sync", "send-interaction"]},
+        {"branch_id": "async", "description": "Asynchronous delivery", "reachability": "Authenticated caller, available target, valid model and mode=async.", "source_ids": ["CODE"], "outcome": "alternate", "disposition": "covered", "scenario_ids": ["send-limit"]},
+        {"branch_id": "invalid-model", "description": "Model validation rejects the payload", "reachability": "All earlier guards pass; only the model value is invalid.", "source_ids": ["CODE"], "outcome": "negative", "disposition": "covered", "scenario_ids": ["send-invalid"]}
+      ],
+      "supports_dynamic_parameters": true,
+      "dynamic_parameters": {
+        "strategy": "risk_based",
+        "strategy_reason": "Finite delivery branches are reviewed separately; open-ended model values use equivalence partitions and risk interactions.",
+        "dimensions": [
+          {"name": "mode", "rationale": "Delivery and response timing differ.", "representatives": [{"value": "sync", "meaning": "Wait for device result."}, {"value": "async", "meaning": "Accept and observe result later."}]},
+          {"name": "payload", "rationale": "Model validity and inclusive limit.", "representatives": [{"value": "typed", "meaning": "Typical valid model value."}, {"value": "limit", "meaning": "Inclusive upper limit."}, {"value": "invalid", "meaning": "Outside the model limit."}]}
+        ],
+        "selected_scenarios": [
+          {"scenario_id": "send-sync", "kind": "typical", "values": {"mode": "sync", "payload": "typed"}, "rationale": "Main delivery flow.", "assertions": ["Typed value and result correlation"], "case_ids": ["SEND-SYNC"]},
+          {"scenario_id": "send-limit", "kind": "boundary", "values": {"mode": "async", "payload": "limit"}, "rationale": "Boundary with asynchronous persistence.", "assertions": ["Exact boundary preserved"], "case_ids": ["SEND-LIMIT"]},
+          {"scenario_id": "send-interaction", "kind": "interaction", "values": {"mode": "sync", "payload": "limit"}, "rationale": "Synchronous delivery and boundary interaction.", "assertions": ["Exact result at boundary"], "case_ids": ["SEND-INTERACTION"]},
+          {"scenario_id": "send-invalid", "kind": "invalid_combination", "values": {"mode": "sync", "payload": "invalid"}, "rationale": "Invalid payload cannot trigger delivery.", "assertions": ["No delivery or persistence"], "case_ids": ["SEND-INVALID"]}
+        ],
+        "boundary_assessment": {"status": "covered"},
+        "interaction_assessment": {"status": "covered"},
+        "invalid_combination_assessment": {"status": "covered"},
+        "required_interactions": [
+          {"values": {"mode": "sync", "payload": "limit"}, "rationale": "A boundary value must survive synchronous result handling.", "source_ids": ["REQ"], "status": "covered", "scenario_ids": ["send-interaction"]}
+        ],
+        "excluded_combinations": [],
+        "uncovered_values": [],
+        "uncovered_interactions": [
+          {"description": "async with invalid payload", "reason": "Representative example omits this interaction; assess the real dispatch paths."}
+        ]
+      },
+      "writes": ["command"],
+      "cleanup": [{"resource_kind": "command", "owner_service": "commands", "owner_suite": "joint-api", "lookup_by": "Exact commandId from this suite receipt and ledger.", "absence_evidence": "Owned result removed and exact commandId is absent."}]
+    },
+    {
+      "endpoint_id": "records:GET:/records/{commandId}",
+      "service": "records",
+      "method": "GET",
+      "path": "/records/{commandId}",
+      "source_ids": ["REQ", "CODE"],
+      "positive_scenarios": [
+        {"scenario_id": "read-result", "expected": "An owned completed command returns its exact result.", "assertions": ["Payload, target and correlation match"], "case_ids": ["READ-RESULT"]}
+      ],
+      "negative_scenarios": [
+        {"scenario_id": "missing-result", "category": "not_found", "expected": "An absent commandId returns the documented absence response.", "assertions": ["Exact absence code"], "case_ids": ["READ-MISSING"]}
+      ],
+      "negative_review": {"method": "Example excerpt of lookup failures.", "status": "partial", "reason": "Add authorization and tenant isolation from real project.", "categories": [{"category": "not_found", "disposition": "covered", "scenario_ids": ["missing-result"]}]},
+      "branch_assessment": {"completeness": "partial", "method": "Example lookup outcomes.", "source_ids": ["CODE"], "reason": "Complete actual permission and lookup branches."},
+      "branches": [
+        {"branch_id": "found", "description": "Owned result exists", "reachability": "Authorized lookup after result persistence.", "source_ids": ["CODE"], "outcome": "positive", "disposition": "covered", "scenario_ids": ["read-result"]},
+        {"branch_id": "missing", "description": "Exact result absent", "reachability": "Authorized lookup with an unused ID.", "source_ids": ["CODE"], "outcome": "negative", "disposition": "covered", "scenario_ids": ["missing-result"]}
+      ],
+      "supports_dynamic_parameters": false,
+      "writes": [],
+      "cleanup": []
+    }
+  ],
+  "journeys": [
+    {
+      "journey_id": "command-result",
+      "title": "Send a command and observe its result in the records service",
+      "case_ids": ["JOURNEY-RESULT"],
+      "steps": [
+        {"step_id": "send", "endpoint_id": "commands:POST:/commands", "depends_on": [], "data_links": [], "action": "Send an owned command and provide a simulated device response.", "observations": ["Exact device payload and response"], "assertions": ["Accepted commandId and matching target"]},
+        {"step_id": "read", "endpoint_id": "records:GET:/records/{commandId}", "depends_on": ["send"], "data_links": [{"from_step": "send", "output": "commandId and device reply", "input": "query commandId and expected result"}], "action": "Poll records using the original commandId.", "observations": ["Persisted record from downstream service"], "assertions": ["Exact correlation, payload and tenant; no unrelated record changes"]}
+      ],
+      "failure_assessment": {"status": "covered"},
+      "failure_scenarios": [
+        {"failure_id": "device-rejects", "at_step_id": "send", "expected": "A rejected command is observable as rejected and never appears as successful.", "assertions": ["Rejection preserved", "No success record within the bounded window"], "observations": ["Device response and downstream record"], "case_ids": ["JOURNEY-REJECTED"]}
+      ],
+      "cleanup": [{"resource_kind": "command", "owner_service": "commands", "owner_suite": "joint-api", "lookup_by": "Exact commandId from this suite receipt and ledger.", "absence_evidence": "Owned result removed and exact commandId is absent."}]
+    }
+  ]
+}
