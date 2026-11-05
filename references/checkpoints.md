@@ -135,7 +135,7 @@ runner在资源创建结果未决或清理失败时，立即调用`checkpoint.py
 
 用户明确授权的独占数据域整体reset按[清理流程](cleanup.md)执行：授权scope和resource kinds内的当前完整盘点可覆盖原创建结果unknown，缺逐条旧receipt不一概阻断恢复；项目确认的共享/系统数据域仍按准确owned规则，保护基线由用户确认。普通case写派发门禁保持生效，恢复动作在原授权及互斥内进行，不借修改scope绕过。只有停源后各获准删除集合全分页归零、保护基线回读及运行时义务核验完成，才能生成scope absence。adapter将该证明映射到原环境/准确租户及kind下的相关ID或原unknown义务，实际提交cleanup_state并回读索引；不能静默清索引、改原账本或以test passed结案。现有接口仍逐准确ID/义务处理，未可靠实现scope证明映射的adapter保留阻塞；此说明不新增原生scope-reset命令或字段。
 
-恢复仍走同一事件：status改为`absence_verified`，evidence中的JSON回读回执须匹配环境、kind、id、status，并含严格布尔值`verified:true`：
+恢复仍走同一事件：status改为`absence_verified`，evidence中的JSON回读回执须匹配环境、kind、id、status，并含严格布尔值`verified:true`。若依靠独立scope sweep证明多个历史义务已结清，先验证sweep完整并覆盖全部原scope，再由项目adapter把逐项实际回读映射到原义务；不得因`sweep.complete=false`、缺kind或缺运行时义务而桥接。登记后回读残留索引，并以相同环境和scope立即重跑gate；只有gate放行才算闭环完成。记录覆盖数量、阻断原因、索引摘要和证据位置，任一步未知或失败均保留阻断：
 
 ```json
 {"resource_environment":"tenant-dev","kind":"category","id":"70","status":"absence_verified","verified":true}

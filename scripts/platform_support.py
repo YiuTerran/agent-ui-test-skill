@@ -27,12 +27,12 @@ RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'} | {
     prefix + digit for prefix in ('COM', 'LPT') for digit in '123456789\u00b9\u00b2\u00b3'}
 
 
-def ensure_directory(path, *, parents=False):
+def ensure_directory(path, *, parents=False, mode=0o777):
     """Accept EEXIST only when the requested directory actually exists."""
     if path.is_dir():
         return
     try:
-        path.mkdir(parents=parents, exist_ok=True)
+        path.mkdir(parents=parents, exist_ok=True, mode=mode)
     except FileExistsError:
         if not path.is_dir():
             raise

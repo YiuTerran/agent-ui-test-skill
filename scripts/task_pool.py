@@ -284,7 +284,7 @@ class Monitor:
                 save(path, state)
 
     def __enter__(self):
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        platform.ensure_directory(self.directory, parents=True, mode=0o700)
         self.owner = ExitStack()
         try:
             require(self.owner.enter_context(lock(self.directory / 'monitor.lock')) is not None,

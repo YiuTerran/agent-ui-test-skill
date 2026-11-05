@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'task_pool.py'
@@ -125,6 +126,22 @@ class PoolTest(unittest.TestCase):
         self.quiet(extra)
         extra[0].stdin.close()
         self.assertEqual(0, extra[0].wait(timeout=3))
+
+    def test_monitor_reuses_existing_directory_with_broker_eexist_semantics(self):
+        directory = self.root / 'existing-pool'
+        directory.mkdir()
+        config = pool.configuration(self.root, 'run-2', 'cli-02', 1, 2,
+                                    interval_seconds=3600, stale_seconds=7201)
+        original_mkdir = Path.mkdir
+
+        def broker_mkdir(path, **options):
+            if path.is_dir() and options.get('exist_ok'):
+                raise FileExistsError()
+            return original_mkdir(path, **options)
+
+        with mock.patch.object(Path, 'mkdir', broker_mkdir):
+            with pool.Monitor(directory, config, sampler=lambda _: measurement()):
+                self.assertTrue((directory / 'pool.json').is_file())
 
     def test_io_budget_is_shared_and_progress_survives_saturation(self):
         first, second = self.child(), self.child()
