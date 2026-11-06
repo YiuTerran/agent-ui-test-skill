@@ -6,6 +6,8 @@
 
 UI/API使用相同辅助入口，API不要求浏览器；新工程用`init --kind api --suite-id backend`，需要共享用例时指定catalog-root。版本2业务/实现格式、迁移与catalog-recover见[套件与共享用例](suites-and-cases.md)。Attempt记录suite及当前资产指纹，结果导入精确绑定本suite的implementation_ids；`full`仅指当前suite范围。共享协调目录的Git忽略/索引与未提交catalog恢复记录也由doctor检查，脚本不扫描或拼接另一工程的报告。
 
+新增UI设计可用独立入口`ui_coverage.py --plan ... --catalog ... --coverage ... --project ... [--discovery ...] [--suite-id ...]`检查声明和映射；退出0/1/2分别表示通过/无效/已知缺口，`--allow-known-gaps`保留缺口输出但返回0。计划、适用性评审、discovery边界及可选`withUiDiagnostics`的真实接入见[UI自动化](ui-testing.md)。不自动修改旧回归或为API加载浏览器。
+
 指定case复测、只跑自动化及确认来源变更先按[确定性任务](workflow.md#确定性任务直接完成)处理；以下入口用于确需工作流绑定的任务。确定性区间在一次宿主调用内连续完成，不为机械步骤派Agent、逐条研究字段或另写多份摘要。组合入口返回成功后直接交付。
 
 直接回归无需ego-browser或需求来源读取工具；只有新增页面探索、来源核验等对应阶段才检查其依赖。调度请求可用[config_path](contracts.md#双预算与就绪任务)指定项目相对配置路径，或显式null跳过读取无关的test/spec.md；不改变同一PROJECT的共享配额与残留索引。

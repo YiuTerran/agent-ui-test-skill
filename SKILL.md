@@ -25,6 +25,8 @@ description: Build and maintain requirement-driven UI and HTTP API automation wi
 
 先确认本轮类型及实际测试工程。UI读取[浏览器与认证](references/browser-and-auth.md)，API读取[API自动化](references/api-testing.md)，不同时加载无关专项资料。两者共享业务case、分别维护实现和结果；跨工程复用、类型覆盖要求及旧项目迁移见[测试套件与共享用例](references/suites-and-cases.md)。首版一个工程工作流对应一个suite，每个业务case在该suite内有一个有效实现；不同断言场景拆case，Playwright project/retry/repeat仍保留原生实例。
 
+新增UI覆盖时读取[UI覆盖设计与校验](references/ui-testing.md#覆盖计划与校验)，按获准页面评审适用维度并校验场景→case→本suite实现→实际发现；已有回归不强制补计划。探索复用[操作契约](references/ui-testing.md#可复用探索操作契约)，提交结果未知先对账，不盲目重放写入。UI失败可显式接入[受限诊断fixture](references/ui-testing.md#可选失败诊断fixture)，沿用原生附件和原始错误，不以运行时自愈弱化断言。
+
 默认职责是测试、诊断和报告。执行获准测试所必需的测试脚本、框架、fixture、runner和报告工具修复可自主完成，不逐次请求许可；仅包含测试用途且不改变业务行为的代码才属于此范围，不能仅凭目录或文件名判断。修改业务代码、业务配置或部署脚本以修复产品，以及实际部署，均须有用户明确授权；确诊bug、生成工作包或普通“继续测试”不构成这些授权。获准业务修复交由对应开发流程，完成后回到测试；修复授权不包含提交、推送、发布或部署，已有相应明确授权可复用。新增业务场景须有明确覆盖范围，用户在原始请求中已明确指定的范围直接登记并执行，按[授权复用](references/workflow.md#授权复用与自动推进)处理；已批准数据范围内的测试准备和清理沿用原授权。
 
 ## 首次接入与用户引导

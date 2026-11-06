@@ -33,7 +33,31 @@ jobs:
         run: python -m pip install -r scripts/requirements-resource-controller.txt
       - name: Run synthetic unit tests
         run: python -m unittest discover -s scripts/tests -v
-      - name: Run task pool client tests
+      - name: Run Node component tests
         env:
           PYTHON: python
-        run: node --test scripts/tests/test_task_pool_client.mjs
+        run: node --test scripts/tests/test_task_pool_client.mjs scripts/tests/test_ui_diagnostics.mjs
+
+  ui-browser-smoke:
+    name: Linux / Chromium UI diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install isolated smoke runtime
+        run: npm install --prefix "$RUNNER_TEMP/ui-playwright" --no-audit --no-fund --package-lock=false @playwright/test@1.64.1
+      - name: Install matching Chromium
+        run: node "$RUNNER_TEMP/ui-playwright/node_modules/@playwright/test/cli.js" install --with-deps chromium
+      - name: Verify diagnostics and native report merge
+        env:
+          AUTO_TEST_PLAYWRIGHT_CLI: ${{ runner.temp }}/ui-playwright/node_modules/@playwright/test/cli.js
+        run: python -m unittest discover -s scripts/tests -p test_ui_browser.py -v

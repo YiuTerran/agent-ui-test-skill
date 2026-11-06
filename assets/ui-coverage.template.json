@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "suite_id": "example-ui",
+  "sources": [
+    {"source_id": "REQ", "kind": "requirements", "revision": "example-v1", "fingerprint": "replace-with-actual-fingerprint", "locations": ["requirements.md#orders"]},
+    {"source_id": "UI", "kind": "ui_exploration", "revision": "example-observation", "fingerprint": "replace-with-actual-fingerprint", "locations": ["test/plans/orders.md"]}
+  ],
+  "inventory": {
+    "method": "Example excerpt: assess only the authorized orders page against requirements and observed controls.",
+    "modules": ["orders"],
+    "included": ["orders-list"],
+    "excluded": [{"page_id": "billing", "reason": "Outside the selected scope."}]
+  },
+  "pages": [
+    {
+      "page_id": "orders-list",
+      "module": "orders",
+      "route_key": "orders.list",
+      "source_ids": ["REQ", "UI"],
+      "scenarios": [
+        {
+          "scenario_id": "create-order",
+          "source_ids": ["REQ", "UI"],
+          "dimensions": ["main_flow", "persistence"],
+          "expected": "An authorized user creates an owned order which remains visible after refresh and re-entry.",
+          "assertions": ["The success state refers to the created order ID.", "Refresh and re-entry preserve the exact submitted business fields."],
+          "case_ids": ["ORDER-CREATE"]
+        }
+      ],
+      "review": {
+        "main_flow": {"status": "covered", "scenario_ids": ["create-order"]},
+        "validation_errors": {"status": "blocked", "reason": "Example omits invalid inputs and failure feedback; assess the real contract."},
+        "loading_empty": {"status": "blocked", "reason": "Add applicable loading, empty and request failure states."},
+        "persistence": {"status": "covered", "scenario_ids": ["create-order"]},
+        "roles_permissions": {"status": "blocked", "reason": "Assess actual role and read/edit restrictions."},
+        "filter_sort_pagination": {"status": "blocked", "reason": "Assess actual list controls and meaningful interactions."},
+        "keyboard": {"status": "blocked", "reason": "Determine applicable keyboard flows."},
+        "viewport": {"status": "blocked", "reason": "Determine supported layouts from the requirements."},
+        "visual": {"status": "blocked", "reason": "Determine whether visual assertions are in scope."}
+      }
+    }
+  ]
+}
