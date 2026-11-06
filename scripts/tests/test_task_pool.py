@@ -107,17 +107,12 @@ class PoolTest(unittest.TestCase):
         child[0].stdin.flush()
 
     def test_task_slots_cover_entire_lifetime_and_waiter_exits_on_eof(self):
-        children = [self.child() for _ in range(4)]
         admitted = []
-        for child in children:
-            try:
-                event = child[1].get(timeout=.4)
-                if event:
-                    admitted.append(child)
-            except queue.Empty:
-                pass
-        self.assertEqual(3, len(admitted))
-        waiter = next(child for child in children if child not in admitted)
+        for _ in range(3):
+            child = self.child()
+            self.event(child, 'admitted')
+            admitted.append(child)
+        waiter = self.child()
         self.quiet(waiter)
         admitted[0][0].stdin.close()
         admitted[0][0].wait(timeout=3)
@@ -295,7 +290,7 @@ class PoolTest(unittest.TestCase):
     def test_foreign_directory_copy_cannot_reuse_health_state(self):
         import shutil
         copy = self.root / 'other-stage'
-        shutil.copytree(self.monitor.directory, copy)
+        shutil.copytree(self.monitor.directory, copy, ignore=shutil.ignore_patterns('*.lock'))
         copied = pool.Pool(copy, self.root, 'run-1', 'cli-01')
         with self.assertRaisesRegex(ValueError, 'foreign'):
             copied.try_claim('task')

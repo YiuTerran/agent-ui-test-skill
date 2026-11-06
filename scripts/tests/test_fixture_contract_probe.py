@@ -231,6 +231,12 @@ class FixtureContractProbeTest(unittest.TestCase):
         self.assertNotIn('AUTO_TEST_SECRET', json.dumps(result))
         return result
 
+    def test_loopback_service_does_not_require_hostname_resolution(self):
+        with mock.patch('socket.getfqdn', side_effect=AssertionError('unexpected DNS')):
+            result = self.inspect(contracts=['partial'])
+        self.assertTrue(result['valid'], result)
+        self.assertTrue(result['checks']['partial'])
+
     def test_actual_fixture_passes_all_http_failure_and_recovery_phases(self):
         result = self.inspect()
         self.assertTrue(result['valid'], result)

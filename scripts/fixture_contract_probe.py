@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+from socketserver import TCPServer
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,13 @@ def settings(request):
         isinstance(value, str) and value in CONTRACTS for value in contracts)
         and len(set(contracts)) == len(contracts), 'invalid_contracts')
     return command, inputs, timeout, contracts
+
+
+class LoopbackServer(HTTPServer):
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name = '127.0.0.1'
+        self.server_port = self.server_address[1]
 
 
 class Service:
@@ -112,7 +120,7 @@ class Service:
                 except (OSError, ValueError):
                     self.close_connection = True
 
-        self.server = HTTPServer(('127.0.0.1', 0), Handler)
+        self.server = LoopbackServer(('127.0.0.1', 0), Handler)
         self.thread = threading.Thread(
             target=lambda: self.server.serve_forever(poll_interval=.02), daemon=True)
 
