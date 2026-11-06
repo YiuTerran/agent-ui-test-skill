@@ -141,6 +141,8 @@ class ReviewFixesTest(TestCase):
         self.assertIn('discovery', result['error'])
         self.preflight()
         self.write('discovery.json', {})
+        snapshot = self.state()['discovery_inventory']['path']
+        self.write(snapshot, {})
         result = self.cli('attempt-init', '--run', self.run, '--owner', self.owner, '--bundle', 'E1',
                           '--input', str(self.project / 'full.json'), fail=True)
         self.assertIn('changed', result['error'])

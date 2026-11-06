@@ -4,9 +4,17 @@
 
 长回归优先复用项目已有恢复能力；独立入口`checkpoint.py`、Playwright sidecar与`work_packages.py`见[断点调度与有限工作包](checkpoints.md)。sidecar是可选的单次结果适配器，仅用于兼容retry=0、repeatEach=1的suite；保留原有重试/重复执行时使用原生采集，不声称逐case断点复用。配额、冲突组、残留派发门禁及验收照常执行。
 
+UI/API使用相同辅助入口，API不要求浏览器；新工程用`init --kind api --suite-id backend`，需要共享用例时指定catalog-root。版本2业务/实现格式、迁移与catalog-recover见[套件与共享用例](suites-and-cases.md)。Attempt记录suite及当前资产指纹，结果导入精确绑定本suite的implementation_ids；`full`仅指当前suite范围。共享协调目录的Git忽略/索引与未提交catalog恢复记录也由doctor检查，脚本不扫描或拼接另一工程的报告。
+
 指定case复测、只跑自动化及确认来源变更先按[确定性任务](workflow.md#确定性任务直接完成)处理；以下入口用于确需工作流绑定的任务。确定性区间在一次宿主调用内连续完成，不为机械步骤派Agent、逐条研究字段或另写多份摘要。组合入口返回成功后直接交付。
 
 直接回归无需ego-browser或需求来源读取工具；只有新增页面探索、来源核验等对应阶段才检查其依赖。调度请求可用[config_path](contracts.md#双预算与就绪任务)指定项目相对配置路径，或显式null跳过读取无关的test/spec.md；不改变同一PROJECT的共享配额与残留索引。
+
+## 定时资源控制
+
+独立入口`resource_controller.py sample|step|watch`用psutil实测CPU/内存，默认30秒检查、80%减员、60%以下扩容，最低1主1sub。watch经显式宿主adapter自动启动或排空其拥有的sub，step供主Agent接宿主原生工具；均不强杀运行中的任务。动态派发请求须绑定resource_controller，状态失效时暂停新增。依赖、完整输入、幂等adapter及安全收尾见[定时资源控制](resource-control.md)；此入口的可选psutil依赖和adapter执行是本页标准库辅助工具之外的明确例外。
+
+项目内部并发使用独立入口`task_pool.py watch|hold`或其`Monitor/Pool`库接口，配套Node客户端位于`assets/task-pool-client.mjs`。它把已领取容量落实为跨进程case/sweep任务槽、全阶段共享I/O槽及回复保留槽，动态缩容采用自然排空。项目需要实际改runner、fixture及请求/协议叶子操作，接入顺序、CLI协议、失效处理和离线测试见[项目接入任务池](resource-control.md#项目接入任务池)；该脚本不代领配额或清理数据。
 
 ## 确定性批量入口
 
@@ -149,7 +157,7 @@ python3 "$WF" preflight --project "$PROJECT" --run "$RUN" --owner "$OWNER" --inp
 }
 ```
 
-- 来源观察由连接器或项目既有读取工具提供，preflight只复用source_cache.verify的身份和完整性检查。观察时间不得早于本轮创建或最新resume；新建run的首次预检通常尚无观察，输出observe，随后按现有source流程读取、核验和登记即可，无需再跑一次全量preflight。未提供来源观察时，不推断远端未变
+- 来源观察由连接器或项目既有读取工具提供，preflight只复用source_cache.verify的身份和完整性检查。版本2中manifest及其files相对catalog根目录，observation.evidence仍相对当前测试工程；旧格式均相对当前工程，不通过`../`混用两种根目录。观察时间不得早于本轮创建或最新resume；新建run的首次预检通常尚无观察，输出observe，随后按现有source流程读取、核验和登记即可，无需再跑一次全量preflight。未提供来源观察时，不推断远端未变
 - runtime支持可选`node`、`directory`非空字符串及`require_node`严格布尔值（默认false）。执行回归的runner传`require_node:true`及实际node，缺node时返回`node_required`、exit2，不创建或续租run。仅做Python侧准备时可省略node，返回`not_checked`，不能视作Node或Playwright就绪。Python文件操作每次preflight自动检查；doctor仍为只读入口
 - discovery由项目实际Playwright发现命令提供，例如现有授权CLI的`--list --reporter=json`输出；必须为该run范围完整且未过滤的发现清单，实际setup项目名由项目配置明确提供。`complete=true`是执行者声明，脚本无法独立证明发现命令未过滤，仍需审阅实际命令及配置。按完整文件路径和精确标题匹配，多project和repeat目标保留数量
 - 发现结果列出代码/审核缺口、缺失plan、缺失独立test、未映射test及歧义。legacy共享test按(spec,title)归到legacy_shared_tests及关联case_ids，独立化义务保留在code_review_gaps，不重复列作未映射或缺失独立test。未提供发现清单时status=unknown，文件存在不证明独立test存在；已审核有效独立case缺席另列reviewed_missing_tests，阻止把该清单用于全量计划

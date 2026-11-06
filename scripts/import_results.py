@@ -22,6 +22,11 @@ _spec = importlib.util.spec_from_file_location(
 reports = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(reports)
 
+_catalog_spec = importlib.util.spec_from_file_location(
+    'auto_test_import_catalog', Path(__file__).with_name('suite_catalog.py'))
+catalog = importlib.util.module_from_spec(_catalog_spec)
+_catalog_spec.loader.exec_module(catalog)
+
 RESULTS = {'passed': 'pass', 'failed': 'fail', 'timedOut': 'fail',
            'interrupted': 'fail', 'skipped': 'skip'}
 OUTCOMES = {'expected', 'unexpected', 'flaky', 'skipped'}
@@ -338,6 +343,9 @@ def import_results(project, run_id, bundle_id, pending_bundle=None):
                 and cov_path.resolve().is_relative_to(project), 'input_path_outside_project')
         state_bytes, cov_bytes = state_path.read_bytes(), cov_path.read_bytes()
         state, cov = json.loads(state_bytes), json.loads(cov_bytes)
+        if cov.get('schema_version') == 2:
+            cov = catalog.project_view(project, catalog.config(project), cov)
+        projection_hash = catalog.digest(cov)
         require(state['run_id'] == run_id, 'state_run_id_mismatch')
         if pending_bundle is not None:
             require(isinstance(pending_bundle, dict) and pending_bundle.get('bundle_id') == bundle_id,
@@ -410,6 +418,8 @@ def import_results(project, run_id, bundle_id, pending_bundle=None):
                      'method': 'automation', 'bundle_id': bundle_id,
                      'runner_test_pointer': pointer, 'runner_result_index': index,
                      'runner_test_status': test['status'], 'evidence': [bundle['execution_result']]}
+            if not setup and match[1].get('implementation_id'):
+                event.update(implementation_ids=[match[1]['implementation_id']], suite=catalog.suite(cov.spec))
             if event['execution_id'] in existing_ids:
                 reject(pointer, index, setup, 'execution_id_conflict')
                 continue
@@ -480,6 +490,9 @@ def import_results(project, run_id, bundle_id, pending_bundle=None):
         reports.recheck_bundle(project, run_id, bundle, require_plan=state.get('native_merge_required', False))
         require(state_bytes == state_path.read_bytes() and cov_bytes == cov_path.read_bytes(),
                 'inputs_changed_during_import')
+        if isinstance(cov, catalog.Coverage):
+            require(projection_hash == catalog.digest(catalog.project_view(
+                project, catalog.config(project), json.loads(cov_bytes))), 'catalog_changed_during_import')
         return {'events': events, 'unresolved': unresolved, 'counts': counts}
     except ImportError:
         raise

@@ -9,8 +9,14 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import importlib.util
 
 from platform_support import ensure_directory, file_lock, relative_parts, sync_directory
+
+_catalog_spec = importlib.util.spec_from_file_location(
+    'auto_test_checkpoint_catalog', Path(__file__).with_name('suite_catalog.py'))
+suite_catalog = importlib.util.module_from_spec(_catalog_spec)
+_catalog_spec.loader.exec_module(suite_catalog)
 
 RESIDUAL_INDEX = 'test/.cache/resource-residuals.json'
 RESOLVED = {'absence_verified', 'retained_verified'}
@@ -19,7 +25,8 @@ RESOURCE_STATES = {'intent', 'confirmed', 'ambiguous', 'cleanup_failed'} | RESOL
 
 @contextmanager
 def residual_lock(project):
-    path = safe(project, RESIDUAL_INDEX, cache=True)
+    suite_catalog.bind_coordination(project)
+    path = suite_catalog.coordination_path(project, RESIDUAL_INDEX)
     ensure_directory(path.parent, parents=True)
     with path.with_suffix('.lock').open('a+b') as stream:
         with file_lock(stream.fileno()):
@@ -27,7 +34,7 @@ def residual_lock(project):
 
 
 def residual_index(project):
-    path = safe(project, RESIDUAL_INDEX, cache=True)
+    path = suite_catalog.coordination_path(project, RESIDUAL_INDEX)
     value = read(path) if path.exists() else {'schema_version': 1, 'resources': {}, 'receipts': {}}
     check(isinstance(value, dict) and value.get('schema_version') == 1 and isinstance(value.get('resources'), dict)
           and isinstance(value.get('receipts'), dict), 'invalid residual index; reconcile before dispatch')
@@ -135,7 +142,10 @@ def persist_cleanup(project, journal, spec, event):
     check(set(event) == {'type', 'event_id', 'resources'}, 'invalid cleanup_state fields')
     identifier(event['event_id'])
     index = residual_index(project)
-    receipt = digest([journal, event['event_id']])
+    identity = [journal, event['event_id']]
+    if suite_catalog.coordination_root(project) != project:
+        identity.insert(0, str(project))
+    receipt = digest(identity)
     content = digest(event)
     if receipt in index['receipts']:
         check(index['receipts'][receipt] == content, 'cleanup event_id reused with different content')
@@ -188,7 +198,7 @@ def persist_cleanup(project, journal, spec, event):
             first_seen_run=prior.get('first_seen_run', run_id),
             resolved_by_run=run_id if resource['status'] in RESOLVED else None)
     index['receipts'][receipt] = content
-    path = safe(project, RESIDUAL_INDEX, cache=True)
+    path = suite_catalog.coordination_path(project, RESIDUAL_INDEX)
     fd, temporary = tempfile.mkstemp(prefix='.resource-residuals-', dir=path.parent)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:

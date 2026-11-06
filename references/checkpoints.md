@@ -4,6 +4,8 @@
 
 进度按[用户可见汇报](workflow.md#进度汇报与长任务等待)执行；已接入sidecar时可用新增`case_end`观察更新本批结束数，不为进度另装适配器或改变retry/repeatEach。`plan.counts.ready/reused_observations/blocked`是调度资格统计；blocked包含在途/清理未核验、容量等待等情况，不能直接当失败数或未执行数。恢复复用观察、本轮结果、未决清理分别展示；观察到test结束不代表资源已释放或正式报告已绑定。
 
+UI/API各自维护本工程checkpoint；case_id仍对应该suite中的业务case，target使用本地精确test身份，不摄取另一suite的观察。规范配置coordination.root启用时，残留索引共享、journal与证据留本工程；同一环境/资源ID的未知清理会阻断相关UI和API写任务，见[共享资源协调](suites-and-cases.md#资源协调)。
+
 ## 一次接入项目runner
 
 先核实suite是否适用：该sidecar每attempt每case只接受一个结果，要求retry=0且repeatEach=1。项目原有重试或重复执行属于本轮目标时，保留原设置，使用原生JSON/blob/HTML及正常attempt-collect，不强行接入sidecar或宣称逐case复用。配额、冲突组及[残留派发门禁](#跨run残留门禁)照常执行。只有项目已采用该单次模型或用户明确同意改变执行语义时才接入，不为长回归自动关闭重试/重复执行。
@@ -133,7 +135,7 @@ runner在资源创建结果未决或清理失败时，立即调用`checkpoint.py
 
 用户明确授权的独占数据域整体reset按[清理流程](cleanup.md)执行：授权scope和resource kinds内的当前完整盘点可覆盖原创建结果unknown，缺逐条旧receipt不一概阻断恢复；项目确认的共享/系统数据域仍按准确owned规则，保护基线由用户确认。普通case写派发门禁保持生效，恢复动作在原授权及互斥内进行，不借修改scope绕过。只有停源后各获准删除集合全分页归零、保护基线回读及运行时义务核验完成，才能生成scope absence。adapter将该证明映射到原环境/准确租户及kind下的相关ID或原unknown义务，实际提交cleanup_state并回读索引；不能静默清索引、改原账本或以test passed结案。现有接口仍逐准确ID/义务处理，未可靠实现scope证明映射的adapter保留阻塞；此说明不新增原生scope-reset命令或字段。
 
-恢复仍走同一事件：status改为`absence_verified`，evidence中的JSON回读回执须匹配环境、kind、id、status，并含严格布尔值`verified:true`：
+恢复仍走同一事件：status改为`absence_verified`，evidence中的JSON回读回执须匹配环境、kind、id、status，并含严格布尔值`verified:true`。若依靠独立scope sweep证明多个历史义务已结清，先验证sweep完整并覆盖全部原scope，再由项目adapter把逐项实际回读映射到原义务；不得因`sweep.complete=false`、缺kind或缺运行时义务而桥接。登记后回读残留索引，并以相同环境和scope立即重跑gate；只有gate放行才算闭环完成。记录覆盖数量、阻断原因、索引摘要和证据位置，任一步未知或失败均保留阻断：
 
 ```json
 {"resource_environment":"tenant-dev","kind":"category","id":"70","status":"absence_verified","verified":true}
@@ -221,7 +223,7 @@ python3 "$SKILL/scripts/work_packages.py" --project "$PROJECT" \
 
 ### 输出action与runner路由
 
-`category`是输入分类，枚举保持不变；以下是输出`packages[].action`。runner先检查顶层`schema_version`，当前为`2`；不支持的版本或未知action停止自动派发并报告，不回退到执行测试。权限和清理门禁优先于category路由。action是下一项工作建议，不生成额外授权，也不全部代表用户等待：`repair_then_affected`中的测试工具维护默认由主Agent处理，业务修改及部署仍需对应明确授权；`cleanup_review_no_blind_retry`和`review_environment_state`按原数据权限及证据核实；`awaiting_authorization`只用于核对既有授权后仍确实缺权限的情况，不为方便执行直接清除输入标志。取得新证据后保留旧包并重新归一化生成新包，门禁满足后续跑。
+`category`是输入分类，枚举保持不变；以下是输出`packages[].action`。归一化输入顶层传`test_kind:"ui"`或`"api"`时输出schema_version=3，缺省保留旧版2行为；新runner显式传当前类型。runner先检查支持的版本及action，未知则停止自动派发并报告。权限和清理门禁优先于category路由。action是下一项工作建议，不生成额外授权，也不全部代表用户等待：测试工具维护由主Agent处理，业务修改及部署仍需明确授权。取得新证据后保留旧包并重新生成，门禁满足后续跑。
 
 | 条件（按优先级） | 输出action | runner下一步 |
 | --- | --- | --- |
@@ -234,7 +236,9 @@ python3 "$SKILL/scripts/work_packages.py" --project "$PROJECT" \
 | category为`product_candidate` | `triage_product_no_automatic_fix` | 产品分诊，修改产品另依授权 |
 | category为`needs_decision` | `diagnose_readonly` | 只读补证，澄清预期 |
 | category为`condition_missing` | `supply_condition` | 补齐缺失条件 |
-| category为`api_exclusive` | `handoff_api` | 转交API测试流程 |
+| category为`api_exclusive`且test_kind为api | `diagnose_api` | 留在API流程核对服务契约与实际HTTP证据 |
+| category为`api_exclusive`且test_kind为ui | `review_api_scope` | 核对API层范围，未授权时不自动扩展 |
+| category为`api_exclusive`且未传test_kind | `handoff_api` | 兼容旧版路由；转交本身不授予权限 |
 | category为`deferred` | `preserve_deferred` | 保留暂缓状态 |
 | category为`unbound_observation` | `preserve_evidence_limitation` | 保留观察及证据限制 |
 

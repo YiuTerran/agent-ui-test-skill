@@ -11,6 +11,30 @@ def lease_path(wf, project, run_id):
     return wf.run_path(project, run_id) / 'identity-leases.json'
 
 
+def bind_run_project(wf, project, state, spec, ledger=None, check_only=False):
+    ledger = wf.pool_ledger(project) if ledger is None else ledger
+    run_id = state['run_id']
+    projects = ledger.setdefault('run_projects', {})
+    if run_id in projects:
+        wf.check(projects[run_id] == str(project),
+                 'identity pool run ID belongs to another project; use distinct run IDs')
+        return
+    legacy = any(
+        run_id in pool.get('requests', {}) or any(
+            account.get('leased_by_run') == run_id
+            or account.get('quarantine', {}).get('run_id') == run_id
+            or account.get('last_return', {}).get('run_id') == run_id
+            for account in pool.get('accounts', {}).values())
+        for pool in ledger['pools'].values())
+    wf.check(not legacy or not spec.get('coordination'),
+             'legacy shared identity pool run has no project binding; reconcile its leases '
+             'with the previous helper in the original project before upgrading')
+    if check_only:
+        return
+    projects[run_id] = str(project)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
+
+
 def write_leases(wf, project, run_id, ledger):
     """Keep each runner's slot indices stable, including partially returned requests."""
     requests = {}
@@ -52,7 +76,7 @@ def close_returned_requests(wf, project, state, ledger):
         del requests[state['run_id']]
         if not requests:
             del ledger['pools'][name]['requests']
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
 
 
 def request_name(wf, args):
@@ -76,6 +100,7 @@ def worker_account(wf, project, args, state, spec):
     ref = request['accounts'][args.slot]
     wf.check(held_by(pool['accounts'].get(ref, {}), state['run_id'], request_id),
              'slot account is no longer leased by this runner')
+    bind_run_project(wf, project, state, spec)
     return {'valid': True, 'pool_ref': ref, 'request': request_id, 'slot': args.slot}
 
 
@@ -105,12 +130,13 @@ def history(wf, account, state, action, item=None):
 
 
 def lease(wf, project, args, state, spec):
-    limit = wf.pool_config(spec, args.pool)['max_accounts']
+    limit = wf.check_pool_limit(project, spec, args.pool)
     request_id = request_name(wf, args)
     wf.check(type(args.count) is int and args.count > 0, '--count must be a positive integer')
     wf.check(request_id not in state.get('closed_pool_requests', {}).get(args.pool, []),
              'lease request has returned accounts; use a new request for a new runner invocation')
     ledger = wf.sync_pool_ledger(project, state)
+    bind_run_project(wf, project, state, spec, ledger=ledger)
     pool = ledger['pools'].setdefault(args.pool, {'accounts': {}})
     accounts = pool['accounts']
     requests = pool.setdefault('requests', {}).setdefault(state['run_id'], {})
@@ -136,7 +162,7 @@ def lease(wf, project, args, state, spec):
         account.update(status='leased', leased_by_run=state['run_id'],
                        leased_by_request=request_id, leased_at=wf.now())
         history(wf, account, state, 'leased')
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
     return {'valid': True, 'pool': args.pool, 'request': request_id, 'leased': assigned,
             'lease_file': write_leases(wf, project, state['run_id'], ledger)}
 
@@ -158,6 +184,7 @@ def give_back(wf, project, args, state, spec):
             issue = state['issues'].get(item.get('issue_id'), {})
             wf.check(issue.get('status') == 'open' and issue.get('kind') == 'environment',
                      'quarantine requires an open environment issue recorded in this run')
+    bind_run_project(wf, project, state, spec, ledger=ledger)
     for item in items:
         account = accounts[item['pool_ref']]
         if account.get('last_return') == {'run_id': state['run_id'], 'item': item}:
@@ -172,7 +199,7 @@ def give_back(wf, project, args, state, spec):
             account['quarantine'] = {'run_id': state['run_id'], 'issue_id': item['issue_id'],
                                      'reason': item.get('reason'), 'evidence': item['evidence'], 'at': wf.now()}
         history(wf, account, state, 'returned_' + item['result'], item)
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
     close_returned_requests(wf, project, state, ledger)
     return {'valid': True, 'pool': args.pool, 'returned': {i['pool_ref']: i['result'] for i in items},
             'lease_file': write_leases(wf, project, state['run_id'], ledger)}
@@ -188,6 +215,7 @@ def resolve(wf, project, args, state, spec):
         wf.check(account and account['status'] == 'quarantined', 'account is not quarantined: ' + str(item.get('pool_ref')))
         wf.check(item.get('result') in RESOLVE_RESULTS, 'result must be available or disabled')
         wf.check(isinstance(item.get('reason'), str) and item['reason'], 'resolution requires a reason')
+    bind_run_project(wf, project, state, spec, ledger=ledger)
     for item in items:
         account = accounts[item['pool_ref']]
         account['resolved_quarantine'] = account.pop('quarantine')
@@ -195,7 +223,7 @@ def resolve(wf, project, args, state, spec):
         if item['result'] == 'available':
             account['baseline_evidence'] = item['evidence']
         history(wf, account, state, 'resolved_' + item['result'], item)
-    wf.atomic(wf.safe_path(project, wf.POOL_LEDGER), ledger)
+    wf.atomic(wf.pool_ledger_path(project), ledger)
     return {'valid': True, 'pool': args.pool, 'resolved': {i['pool_ref']: i['result'] for i in items}}
 
 
@@ -211,6 +239,8 @@ def dispatch(api, project, args):
         else:
             wf.owner_check(state, args.owner)
         wf.check(state['acceptance'] not in wf.TERMINAL, 'pool commands require an active round')
+        wf.pool_config(spec, args.pool)
+        bind_run_project(wf, project, state, spec, check_only=True)
         handler = {'pool-lease': lease, 'pool-account': worker_account,
                    'pool-return': give_back, 'pool-resolve': resolve}[args.command]
         return handler(wf, project, args, state, spec)

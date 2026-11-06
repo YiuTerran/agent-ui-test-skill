@@ -4,6 +4,8 @@
 
 指定case复测或只跑自动化先按[直接完成](workflow.md#确定性任务直接完成)执行；以下机器绑定契约适用于工作流管理的run。直接执行保留原生JSON/HTML/blob、真实命令回执及资源账本，单次原生HTML可交付。工作流登记和最新需求验收状态分别说明，不为补登记而扩大范围、修改执行中的输入或重复业务测试。
 
+UI/API共享报告绑定机制，各suite独立执行及合并。summary.coverage_layers列出suite、业务case数、本地实现与results_by_kind，另一required_kind显示not_evaluated。业务case、实现、原生project/retry/repeat实例分别计数；本suite的full完整不代表项目全部类型或另一工程已通过。HTTP响应、状态回读及清理回执是API证据，不能把源码阅读或Mock通过计为真实接口执行。
+
 ## 每次命令独立保存
 
 run可以包含多次CLI执行。每次分配新的`bundle_id`，重跑、认证重试及不同subset均保留独立目录：
@@ -215,6 +217,8 @@ python3 <skill>/scripts/workflow.py collect-results --project PATH --run RUN --o
 - 复用已有命令/任务时间戳，重点看首次CLI前、批次间、正式full及full结束到交付的区间；phase_time按任务生命周期合批写入，不为计时打断Agent
 - 非零退出批次包含批内有效结果，不全算浪费；未归因区间不等于模型思考或空闲；报告生成的数秒不代表整个收尾耗时
 - 并发度由结果区间估算，不当作CPU利用率，也不据此扩大配额；时间戳不足时保留unknown
+
+当用户询问“用例为什么跑这么久”时，先按真实test结果的`duration`定位慢case，再与同一CLI调用区间、runner日志、fixture/teardown及外部依赖证据对齐。报告逐case墙钟和可证明的等待/重试/超时；仅在有独立区间证据时拆分fixture、启动、teardown或服务端等待。两条case的duration之和不等于整轮耗时，单条case变慢也不能解释CLI外空档。缺少相位数据时将差额列为未归因，不归咎于某步骤、工具或模型，也不为补计时重跑业务。
 
 报告一致性核验在同一项目锁内批量读取一次已校验的回收日志，当前调用内供bundle、合并产物和报告链接判断复用。各次调用重新验证日志、计划与路径状态，继续检查保留文件SHA-256及全部逐次映射；损坏日志、无日志缺失或重新出现的路径均不能凭历史快照认定已回收。
 

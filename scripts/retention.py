@@ -606,6 +606,16 @@ def selection(tree, scopes, current_run=None, previously=None):
     blocks = re.findall(r'```json workflow-config\s*\n(.*?)\n```', spec_text, re.S)
     require(len(blocks) == 1, 'invalid workflow-config')
     config = json.loads(blocks[0])
+    root_value = config.get('coordination', {}).get('root', '.')
+    coordination = Path(root_value)
+    if not coordination.is_absolute():
+        coordination = Path(tree.path) / coordination
+    external_coordination = coordination.resolve() != Path(tree.path).resolve()
+    binding_path = 'test/.cache/coordination-root.json'
+    if tree.exists(binding_path):
+        binding = snap.json(binding_path)
+        require(binding == {'schema_version': 1, 'root': str(coordination.resolve())},
+                'coordination root changed; restore bound root before retention')
     fixed = scopes_of(config['scope']['fixed'])
     require(set(scopes) <= set(fixed), 'scopes outside project fixed scopes')
     cov = snap.json('test/plans/coverage.json')
@@ -616,6 +626,9 @@ def selection(tree, scopes, current_run=None, previously=None):
     require(not CASE_INSENSITIVE or len(aliases) == len(inventory),
             'case-sensitive Windows cache aliases are not supported for retention')
     limitations = []
+    if external_coordination:
+        limitations.append({'reason': 'external_coordination_preserves_runs',
+                            'path': RUNS})
     refs = []
     origins = {}
 
@@ -633,6 +646,13 @@ def selection(tree, scopes, current_run=None, previously=None):
 
     add_refs(config, 'test/spec.md', reason='configured_reference')
     add_refs(cov, 'test/plans/coverage.json', reason='effective_coverage_reference')
+    if cov.get('schema_version') == 2:
+        root = config.get('catalog', {}).get('root', '.')
+        catalog_root = Path(root) if Path(root).is_absolute() else Path(tree.path) / root
+        if catalog_root.resolve() == Path(tree.path).resolve():
+            catalog = snap.json('test/plans/catalog.json')
+            require(catalog.get('schema_version') == 2, 'invalid business catalog')
+            add_refs(catalog, 'test/plans/catalog.json', reason='shared_business_reference')
     for name, pool in (pools or {}).get('pools', {}).items():
         require(isinstance(pool, dict) and isinstance(pool.get('accounts'), dict), 'invalid identity pool accounts')
         for ref, account in pool['accounts'].items():
@@ -679,6 +699,8 @@ def selection(tree, scopes, current_run=None, previously=None):
     eligible = {rid for rid, state in states.items() if state['acceptance'] in TERMINAL
                 and not active(state) and not state.get('recovery_required') and rid != current_run
                 and rid not in reserved_runs}
+    if external_coordination:
+        eligible.clear()
     bundles = {}
     for rid, state in states.items():
         prefix = RUNS + '/' + rid

@@ -1,4 +1,4 @@
-流程与字段说明见已安装技能ego-lite-playwright-e2e的SKILL.md
+流程与字段说明见已安装技能auto-test-skill的SKILL.md；新suite使用init --kind ui/api --suite-id稳定标识，旧格式保留兼容。
 
 ```json workflow-config
 {
@@ -20,12 +20,13 @@
 
 由Agent按已安装技能的`references/onboarding.md`引导填写；能从工程发现的内容先复用，未确认项标“待确认”。本节只作说明，不新增配置块必填字段。受限URL、本地绝对路径和凭据放已忽略的本地配置，此处只写可公开的标识、引用与实际加载方式。
 
-- 前端工程/工作区（仓库相对位置）与测试命令cwd：
+- 测试类型（UI/API）、工程/工作区（仓库相对位置）与测试命令cwd：
+- suite稳定标识、共享catalog根目录及业务case复用方式：
 - 权威需求来源标识、读取方式、版本与模块范围（具体映射填`source`）：
-- 测试环境profile、页面入口加载方式与部署版本：
-- 前端启动/测试/清理命令（复用项目脚本，配置填`commands`）：
+- 测试环境profile、页面或HTTP入口加载方式与部署版本：
+- 服务启动/测试/清理命令（复用项目脚本，配置填`commands`）：
 - 后端代码库引用及版本（按需；可填“不提供/纯黑盒”）：
-- 工具检查结论（Python、Node/包管理器、Playwright/浏览器、ego-lite集成、按需资料工具）：
+- 工具检查结论（Python、Node/包管理器、Playwright；UI的浏览器/ego-lite或API的HTTP认证与依赖；按需资料工具）：
 - runner运行时门禁入口、实际Node解析方式、命令cwd及产物父目录；Python/Node探针回执位置与复检条件：
 - fixture跨进程锁adapter、实际锁/分配实现及依赖引用；离线锁契约检查命令、回执与失败停止派发入口（不适用时写“无”）：
 - 首轮候选流程、用户选择与待澄清项（未选择不视为授权）：
@@ -43,6 +44,7 @@
 - 不可删除身份的复用池：池名（上限写入配置块`identity_pools`）、密码来源（凭据文件/HMAC种子的密钥名）：
 - 清理顺序与中断恢复入口：
 - 共享配置冲突组key与锁位置：
+- 跨工程共用资源时的coordination.root、环境/账号/业务资源冲突键；共享根目录的/test/.cache/忽略规则：
 
 ## 资源恢复契约
 

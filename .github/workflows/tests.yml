@@ -26,5 +26,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install resource sampling dependency
+        run: python -m pip install -r scripts/requirements-resource-controller.txt
       - name: Run synthetic unit tests
         run: python -m unittest discover -s scripts/tests -v
+      - name: Run task pool client tests
+        env:
+          PYTHON: python
+        run: node --test scripts/tests/test_task_pool_client.mjs

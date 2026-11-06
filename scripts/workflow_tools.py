@@ -60,7 +60,9 @@ def source_checks(wf, project, state, spec, cov, request):
         # A resumed run starts a new observation round; creation time is insufficient.
         round_start = max([state['created_at']] +
                           [v['at'] for v in state.get('resume_history', [])], key=wf.dt)
-        result = verifier.verify(project, dict(item, round_started_at=round_start))
+        snapshot_root = cov.root if isinstance(cov, wf.suite_catalog.Coverage) else project
+        result = verifier.verify(snapshot_root, dict(item, round_started_at=round_start),
+                                 evidence_project=project)
         baseline = cov.get('sources', {}).get(sid, {})
         observation = item.get('observation', {})
         result['matches_effective_baseline'] = (
@@ -118,7 +120,7 @@ def discovery_diff(wf, project, state, spec, cov, request):
         if case.get('execution') == 'automation':
             target = legacy_mapping if case.get('legacy_group') else mapping
             target.setdefault((case.get('spec'), case.get('title')), []).append(cid)
-        if case.get('plan') and not wf.safe_path(project, case['plan']).is_file():
+        if case.get('plan') and not wf.suite_catalog.asset_path(project, cov, case['plan']).is_file():
             result['missing_plan_files'].append(cid)
     matched = set()
     for row in rows:
@@ -187,6 +189,28 @@ def preflight(wf, project, args):
                         'error': str(error), 'run_started': True,
                         'next_steps': ['repair_supplied_evidence_then_reuse_this_run']}
         if diff['status'] == 'checked':
+            source = wf.safe_path(project, diff['evidence'])
+            payload = source.read_bytes()
+            checksum = wf.hashlib.sha256(payload).hexdigest()
+            wf.check(checksum == diff['evidence_sha256'], 'discovery changed during preflight')
+            snapshot_relative = f"test/.cache/runs/{state['run_id']}/discovery/{checksum}.json"
+            snapshot = safe_cache(wf, project, snapshot_relative)
+            if snapshot.exists():
+                wf.check(snapshot.read_bytes() == payload, 'discovery snapshot changed')
+            else:
+                wf.platform_support.ensure_directory(snapshot.parent, parents=True)
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=snapshot.parent, delete=False) as stream:
+                        temporary = Path(stream.name)
+                        stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, snapshot)
+                    wf.platform_support.sync_directory(snapshot.parent)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
             context = {'coverage': {cid: diff['code_review_gaps'].get(cid, [])
                                     for cid in wf.scoped_cases(state, cov)}}
             gaps = {cid for cid in wf.scoped_cases(state, cov)
@@ -195,7 +219,8 @@ def preflight(wf, project, args):
             gaps.update(cid for row in diff['legacy_shared_tests'] for cid in row['case_ids'])
             state['automation_gap_case_ids'] = sorted(gaps)
             inventory = {
-                'path': diff['evidence'], 'sha256': diff['evidence_sha256'],
+                'path': snapshot_relative, 'sha256': checksum,
+                'source_path': diff['evidence'],
                 'setup_projects': request['discovery']['setup_projects'],
                 'scopes': state['scopes'], 'freshness_marker': state['freshness_marker'],
                 'missing_tests': diff['missing_tests'],
@@ -318,6 +343,7 @@ def attempt_init(wf, project, args):
             plan['code_scope_review'] = wf.report_artifacts.code_import_hints(project, wf.load(path), roots)
         plan['shard'] = wf.report_artifacts.command_shard(plan['command'])
         plan.update(bundle_id=args.bundle, run_id=state['run_id'], schema_version=2,
+                    suite=wf.suite_catalog.suite(spec),
                     planned_at=wf.now(),
                     freshness_marker=state['freshness_marker'],
                     config_fingerprint=wf.fingerprint(spec), asset_fingerprint=wf.fingerprint(cov))

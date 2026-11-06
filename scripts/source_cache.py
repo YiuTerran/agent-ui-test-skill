@@ -51,8 +51,9 @@ def capture(project, request):
         'schema_version': 1, 'captured_at': datetime.now(timezone.utc).isoformat(), 'files': files}
 
 
-def verify(project, request):
+def verify(project, request, *, evidence_project=None):
     project = Path(project).resolve()
+    evidence_project = project if evidence_project is None else Path(evidence_project).resolve()
     if not isinstance(request, dict) or not isinstance(request.get('observation', {}), dict):
         raise ValueError('verify request and observation must be objects')
     observation = request.get('observation', {})
@@ -70,7 +71,7 @@ def verify(project, request):
     if not date(request['round_started_at']) <= date(observation['observed_at']) <= datetime.now(timezone.utc):
         raise ValueError('source observation is stale or in the future')
     # An observation artifact proves the read was recorded, not its external authenticity.
-    safe_file(project, observation.get('evidence'))
+    safe_file(evidence_project, observation.get('evidence'))
     try:
         manifest = json.loads(safe_file(project, request.get('manifest')).read_text(encoding='utf-8'))
     except (ValueError, OSError):

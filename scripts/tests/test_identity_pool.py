@@ -74,6 +74,21 @@ class IdentityPoolTest(unittest.TestCase):
         self.assertIn('is full: 2/2', error)
         self.assertNotIn('a3', self.state()['resources'])
 
+    def test_legacy_local_lease_binds_project_and_preserves_replay_and_return(self):
+        self.begin()
+        self.create('a1', 'user-01')
+        self.pool('pool-lease', '--count', '1')
+        ledger = wf.pool_ledger(self.project)
+        del ledger['run_projects']
+        wf.atomic(wf.pool_ledger_path(self.project), ledger)
+        self.assertEqual(self.pool('pool-account', '--workers', '1', '--slot', '0')['pool_ref'], 'user-01')
+        self.assertEqual(wf.pool_ledger(self.project)['run_projects'][self.run], str(self.project.resolve()))
+        self.assertTrue(self.pool('pool-lease', '--count', '1')['replayed'])
+        item = {'pool_ref': 'user-01', 'result': 'pooled', 'evidence': ['test/evidence.txt']}
+        self.give_back(item)
+        self.give_back(item)
+        self.assertEqual(self.ledger()['user-01']['status'], 'available')
+
     def test_pool_requires_spec_limit_and_fixed_membership(self):
         self.start()
         self.mark_legacy_run()
