@@ -101,6 +101,12 @@ python3 "$SKILL_DIR/scripts/fixture_lock_probe.py" --project "$PROJECT" --input 
 
 首次接入离线验证“adapter缺失、锁检查失败均不会启动产品CLI”。多种独立锁分别配置和检查；无跨进程fixture锁时不要求接入。不兼容此协议的既有等价契约测试可继续使用，但须实际覆盖上述行为并绑定真实实现，不用本仓库自身的内核锁单测充当项目接入证明。
 
+## fixture行为契约检查
+
+`fixture_contract_probe.py`通过受控本地HTTP服务和项目真实fixture adapter，核对部分初始化/清理失败、配置恢复及结案重入、隐藏列表/拒绝访问/分页不完整的缺席误判，并扫描合成secret的输出与产物泄漏。输入可按fixture职责选择适用组，声明adapter及真实实现文件；命令、HTTP协议、规范化账本及边界见[fixture离线行为契约](fixture-contracts.md)。
+
+脚本默认仅探测，exit0/2；可用`--run <项目runner argv...>`形成实际启动门禁，每次重新探测，失败不会spawn runner，成功才透传runner退出码和输出。不会拿历史成功JSON放行、生成业务结果或关闭真实残留。目标项目仍需将门禁接入实际入口，安装脚本不等于已接入。
+
 ## 统一预检
 
 ```sh
