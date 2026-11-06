@@ -263,6 +263,40 @@ class CoverageTest(unittest.TestCase):
         self.plan['journeys'][0]['failure_scenarios'][0]['observations'] = []
         self.invalid('observations')
 
+    def test_journey_failure_cannot_reuse_success_case(self):
+        self.make_complete()
+        journey = self.plan['journeys'][0]
+        journey['failure_scenarios'][0]['case_ids'] = journey['case_ids'][:]
+        del self.coverage['implementations']['JOURNEY-REJECTED']
+        self.invalid('independent journey scenarios must use distinct cases')
+
+    def test_independent_journey_failures_cannot_reuse_one_case(self):
+        self.make_complete()
+        journey = self.plan['journeys'][0]
+        additional = copy.deepcopy(journey['failure_scenarios'][0])
+        additional.update(failure_id='downstream-rejects', at_step_id='read',
+                          expected='Downstream rejects the query.')
+        journey['failure_scenarios'].append(additional)
+        self.invalid('independent journey scenarios must use distinct cases')
+
+    def test_journey_failures_with_distinct_discovered_tests_are_checked(self):
+        self.make_complete()
+        journey = self.plan['journeys'][0]
+        additional = copy.deepcopy(journey['failure_scenarios'][0])
+        additional.update(failure_id='downstream-rejects', at_step_id='read',
+                          case_ids=['JOURNEY-DOWNSTREAM'], expected='Downstream rejects the query.')
+        journey['failure_scenarios'].append(additional)
+        self.catalog['cases']['JOURNEY-DOWNSTREAM'] = {'required_kinds': ['api'], 'status': 'active'}
+        self.coverage['implementations']['JOURNEY-DOWNSTREAM'] = dict(
+            self.coverage['implementations']['JOURNEY-REJECTED'], case_id='JOURNEY-DOWNSTREAM',
+            test_id='JOURNEY-DOWNSTREAM', title='JOURNEY-DOWNSTREAM scenario')
+        self.discovery['suites'][0]['specs'].append({
+            'file': 'test/src/api.spec.ts', 'title': 'JOURNEY-DOWNSTREAM scenario',
+            'tests': [{'projectName': 'api'}]})
+        result = self.validate()
+        self.assertEqual(result['status'], 'checked')
+        self.assertEqual(result['counts']['journey_failure_scenarios'], 2)
+
     def test_case_must_be_active_valid_api_automation(self):
         self.coverage['implementations']['SEND-SYNC']['implementation'] = 'draft'
         self.invalid('not valid automation')

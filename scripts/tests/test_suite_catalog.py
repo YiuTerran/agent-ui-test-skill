@@ -496,6 +496,73 @@ class SharedPoolTest(unittest.TestCase):
             wf.check_pool_limit(second.project, spec, 'pool-a')
 
 
+class SharedPoolOwnershipTest(unittest.TestCase):
+    def setUp(self):
+        fixed_now = wf.datetime.now(wf.timezone.utc)
+        with patch.object(wf, 'datetime', wraps=wf.datetime) as clock, \
+                patch.object(wf.secrets, 'token_hex', return_value='12345678'):
+            clock.now.return_value = fixed_now
+            SharedPoolTest.setUp(self)
+        first, second = self.fixtures
+        self.assertEqual(first.run, second.run)
+        self.assertNotEqual(first.project, second.project)
+        first.create('account', 'shared-user')
+        first.pool('pool-lease', '--count', '1')
+
+    def test_foreign_project_cannot_replay_or_resolve_worker_assignment(self):
+        first, second = self.fixtures
+        before = wf.pool_ledger(first.project)
+        for args in (('--count', '1'), ('--request', 'runner-2', '--count', '1')):
+            self.assertIn('another project', second.pool('pool-lease', *args, fail=True)['error'])
+        self.assertIn('another project', second.pool(
+            'pool-account', '--workers', '1', '--slot', '0', fail=True)['error'])
+        self.assertEqual(before, wf.pool_ledger(first.project))
+        self.assertTrue(first.pool('pool-lease', '--count', '1')['replayed'])
+        self.assertEqual(first.pool('pool-account', '--workers', '1', '--slot', '0')['pool_ref'],
+                         'shared-user')
+        self.assertEqual(wf.pool_run_accounts(second.project, second.run), {'leased': [], 'quarantined': []})
+        view = second.cli('status', '--run', second.run, '--full')['identity_pools']['pool-a']
+        self.assertEqual(view['leased'], 1)
+        self.assertEqual(view['leased_by_this_run'], [])
+
+    def test_foreign_return_and_return_replay_cannot_release_owners_account(self):
+        first, second = self.fixtures
+        item = {'pool_ref': 'shared-user', 'result': 'pooled', 'evidence': ['test/evidence.txt']}
+        before = wf.pool_ledger(first.project)
+        self.assertIn('another project', second.give_back(item, fail=True)['error'])
+        self.assertEqual(before, wf.pool_ledger(first.project))
+        first.give_back(item)
+        first.give_back(item)
+        before = wf.pool_ledger(first.project)
+        self.assertIn('another project', second.give_back(item, fail=True)['error'])
+        self.assertEqual(before, wf.pool_ledger(first.project))
+        self.assertEqual(first.pool('pool-lease', '--request', 'runner-2', '--count', '1')['leased'],
+                         ['shared-user'])
+
+    def test_foreign_run_does_not_inherit_quarantine_acceptance_block(self):
+        first, second = self.fixtures
+        first.record({'type': 'issue', 'issue_id': 'I1', 'kind': 'environment', 'status': 'open',
+                      'summary': 'Synthetic account state needs reconciliation'})
+        first.give_back({'pool_ref': 'shared-user', 'result': 'quarantined', 'issue_id': 'I1',
+                         'evidence': ['test/evidence.txt']})
+        self.assertEqual(wf.pool_run_accounts(first.project, first.run)['quarantined'], ['pool-a/shared-user'])
+        self.assertEqual(wf.pool_run_accounts(second.project, second.run)['quarantined'], [])
+
+    def test_unbound_legacy_shared_lease_is_not_adopted_by_either_project(self):
+        first, second = self.fixtures
+        ledger = wf.pool_ledger(first.project)
+        del ledger['run_projects']
+        wf.atomic(wf.pool_ledger_path(first.project), ledger)
+        for fixture in (second, first):
+            self.assertIn('no project binding', fixture.pool('pool-lease', '--count', '1', fail=True)['error'])
+            self.assertIn('no project binding', fixture.pool(
+                'pool-account', '--workers', '1', '--slot', '0', fail=True)['error'])
+            self.assertIn('no project binding', fixture.give_back(
+                {'pool_ref': 'shared-user', 'result': 'pooled', 'evidence': ['test/evidence.txt']},
+                fail=True)['error'])
+        self.assertEqual(ledger, wf.pool_ledger(first.project))
+
+
 class ApiSchedulingTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='api-coordination-')

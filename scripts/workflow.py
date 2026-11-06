@@ -487,6 +487,10 @@ def pool_ledger(project):
     ledger = load(path)
     check(isinstance(ledger, dict) and ledger.get('schema_version') == 1 and isinstance(ledger.get('pools'), dict),
           'invalid identity pool ledger: ' + POOL_LEDGER)
+    projects = ledger.get('run_projects', {})
+    check(isinstance(projects, dict) and all(isinstance(run_id, str) and isinstance(owner_project, str)
+                                           and owner_project for run_id, owner_project in projects.items()),
+          'invalid identity pool run project bindings')
     return ledger
 
 
@@ -599,7 +603,10 @@ def sync_recorded_pools(project, state, events):
 
 def pool_run_accounts(project, run_id):
     found = {'leased': [], 'quarantined': []}
-    for name, pool in pool_ledger(project)['pools'].items():
+    ledger = pool_ledger(project)
+    if ledger.get('run_projects', {}).get(run_id, str(project)) != str(project):
+        return found
+    for name, pool in ledger['pools'].items():
         for ref, account in sorted(pool.get('accounts', {}).items()):
             if account['status'] == 'leased' and account.get('leased_by_run') == run_id:
                 found['leased'].append(name + '/' + ref)
@@ -610,7 +617,9 @@ def pool_run_accounts(project, run_id):
 
 def pool_view(project, state, spec):
     configured = spec.get('identity_pools') if isinstance(spec.get('identity_pools'), dict) else {}
-    pools = pool_ledger(project)['pools']
+    ledger = pool_ledger(project)
+    pools = ledger['pools']
+    own_run = ledger.get('run_projects', {}).get(state['run_id'], str(project)) == str(project)
     view = {}
     for name in sorted(set(configured) | set(pools)):
         accounts = pools.get(name, {}).get('accounts', {})
@@ -618,7 +627,8 @@ def pool_view(project, state, spec):
         view[name] = dict({s: sum(a['status'] == s for a in accounts.values()) for s in POOL_STATES},
                           max_accounts=limit,
                           leased_by_this_run=sorted(r for r, a in accounts.items()
-                                                    if a['status'] == 'leased' and a.get('leased_by_run') == state['run_id']),
+                                                    if own_run and a['status'] == 'leased'
+                                                    and a.get('leased_by_run') == state['run_id']),
                           quarantined_accounts=[dict(a['quarantine'], pool_ref=r) for r, a in sorted(accounts.items())
                                                 if a['status'] == 'quarantined'])
     return view

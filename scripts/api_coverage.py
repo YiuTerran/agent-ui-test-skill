@@ -659,7 +659,7 @@ class Validator:
                 self.require(journey_id not in journey_ids, path + '.journey_id', 'duplicate journey_id')
                 journey_ids.add(journey_id)
             self.text(journey.get('title'), path + '.title')
-            self.identifiers(journey.get('case_ids'), path + '.case_ids')
+            scenario_cases = set(self.identifiers(journey.get('case_ids'), path + '.case_ids'))
             steps = self.object_list(journey.get('steps'), path + '.steps')
             step_ids, journey_services, written = set(), set(), {}
             prior_steps = {}
@@ -736,7 +736,10 @@ class Validator:
                 failure_ids.add(failure_id)
                 self.require(self.choice(failure.get('at_step_id'), step_ids), failure_path + '.at_step_id',
                              'must reference a journey step')
-                self.validate_assertions(failure, failure_path)
+                case_ids = self.validate_assertions(failure, failure_path)
+                self.require(scenario_cases.isdisjoint(case_ids), failure_path + '.case_ids',
+                             'independent journey scenarios must use distinct cases')
+                scenario_cases.update(case_ids)
                 self.string_list(failure.get('observations'), failure_path + '.observations')
                 self.counts['journey_failure_scenarios'] += 1
             cleanup = self.object_list(journey.get('cleanup'), path + '.cleanup', nonempty=False)

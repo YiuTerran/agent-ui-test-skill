@@ -72,7 +72,7 @@
 - `positive_scenarios/negative_scenarios`带唯一scenario_id、预期、断言和case_ids；同一接口的独立场景使用不同case，独立case映射不同test声明。同一流程可由一个场景覆盖多个分支，参数化场景须发现为独立test。`negative_review`逐类评估covered/blocked/not_applicable；按该接口实际能力补全适用类别。
 - `branches`记录可到达条件、来源、outcome及场景映射。covered关联真实场景，blocked/not_applicable带理由。普通分支不因接口存在动态参数而免除。
 - `dynamic_parameters`记录代表维度、选择、必测交互及已知缺口。selected_scenarios引用本接口场景且使用其case；invalid_combination必须关联负例。`required_interactions`带来源和覆盖状态；`excluded_combinations`仅登记契约禁止作为输入构造的组合。
-- `journeys`使用按依赖排列的steps、data_links和下游观测，包含失败评估及清理owner。`writes/cleanup`须完整对应，旅程汇总核对服务、资源类型和suite归属。
+- `journeys`使用按依赖排列的steps、data_links和下游观测，包含失败评估及清理owner。旅程成功与各独立失败场景须使用互不重叠的case_ids及独立test声明，不以同一测试重复计算覆盖。`writes/cleanup`须完整对应，旅程汇总核对服务、资源类型和suite归属。
 
 准备完整Playwright发现JSON，并在新增实现映射就绪后调用：
 

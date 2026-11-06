@@ -1,7 +1,7 @@
 # Auto Test Skill
 
 将需求、页面探索或后端代码阅读、独立 Playwright 用例和回归证据连起来的 Agent 技能。
-技能名为 `auto-test-skill`，入口是 [SKILL.md](SKILL.md)。本分支为 `api`，用于验证统一 UI/API 工作流。
+技能名为 `auto-test-skill`，入口是 [SKILL.md](SKILL.md)，统一支持 UI/API 工作流。
 
 适用于 Web UI 和真实 HTTP API 的覆盖补全与回归验收；不用于单元测试、进程内 MockMvc/TestClient、一次性页面检查或直接修复业务代码。
 
@@ -34,14 +34,14 @@
 以 Codex 默认的用户技能目录为例（已设置 `CODEX_HOME` 时使用其下的 `skills/`）：
 
 ```sh
-git clone --branch api https://github.com/YiuTerran/agent-ui-test-skill.git \
+git clone https://github.com/YiuTerran/agent-ui-test-skill.git \
   "$HOME/.codex/skills/auto-test-skill"
 ```
 
 其他支持目录式 `SKILL.md` 的 Agent 使用其对应的技能目录；浏览器工具和授权机制仍须在该环境实际验证。
 也可以保留当前 checkout，通过绝对路径引用其中的 `SKILL.md`，避免维护两份源码。
 
-如果当前 Agent 支持安装技能，也可以告诉它：**“请从 `YiuTerran/agent-ui-test-skill` 的 `api` 分支安装 `auto-test-skill`。”**
+如果当前 Agent 支持安装技能，也可以告诉它：**“请从 `YiuTerran/agent-ui-test-skill` 的默认分支安装 `auto-test-skill`。”**
 安装后可继续询问“这个 skill 怎么用？”，或在目标测试工程目录按首次接入引导配置。
 
 调用示例：

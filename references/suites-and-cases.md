@@ -109,6 +109,8 @@ python3 "$SKILL_DIR/scripts/workflow.py" migrate --project "$PROJECT" --suite-id
 
 目录须预先存在，`test/.cache/`须忽略；root与catalog可不同。共享配额、身份池和checkpoint残留索引在此目录，run/证据/报告仍留本工程。环境标识、池名、池上限与账号/组织/配置/业务资源conflict_keys必须一致；调度owner_pid须代表实际任务。
 
+身份池在首次租约操作前持久绑定run_id与规范项目路径；共享协调中的其他项目不能以同一run_id重放请求、解析worker账号或归还租约，须使用独立run。绑定在归还后保留，防止旧请求被另一项目重放；本轮占用及隔离统计也按项目归属区分。共享参与方须统一升级helper，不能混用忽略绑定的旧版。旧版未绑定项目的本地租约可原地兼容；已启用coordination的旧共享租约不能猜测归属，升级前须在原执行工程用旧版helper核清并归还，不能通过删账本或补写绑定认领。
+
 UI和API按test_kind分别计算Agent与playwright_workers配额，各自应用本工程concurrency配置；旧租约未写test_kind时归入UI。配额账本保留全局计数和active_by_kind分类计数，UI占满其worker或Agent上限时仍可派发有余量的API任务。API执行占自身playwright_workers，browser_parallel_cap可设0；UI保留worker与浏览器绑定，实际浏览器认证另以UI任务声明。整机可用CPU、内存、宿主槽位及pressure继续限制派发，内存估计包含两类活跃占用；类型独立不等于物理资源无限。CPU/内存未知时保守派发，worker内HTTP并发和服务限流仍由项目fixture控制。
 
 所有writer在派发前执行共享残留gate；cleanup_state仍须真实回读证明，不以进程退出代替资源缺席。共享目录不可用、配置不一致或状态未知时停止相关派发，不临时退回各自账本。遗留本地账本已有活跃租约、池账号或残留时，先在原配置下核清后再启用共享协调，不能通过切root清空占用。
