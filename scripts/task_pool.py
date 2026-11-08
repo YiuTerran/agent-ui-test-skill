@@ -224,6 +224,7 @@ class Monitor:
                                        if key != 'schema_version'})
         self.sampler = sampler or resources.sample
         self.capacity = 1
+        self.ordinary_capacity = 1
         self.stop = threading.Event()
         self.thread = None
         self.pool = None
@@ -246,10 +247,9 @@ class Monitor:
                 self.capacity, self.config['maximum_tasks'], measurement, initial,
                 self.config['high_percent'], self.config['low_percent'])
             ordinary_maximum = self.config['maximum_io'] - self.config['progress_slots']
-            previous_io = (self.pool.state()['ordinary_io_capacity'] if not initial else 1)
             if capacity > self.capacity and not initial and (
                     self.pool.occupied('task', self.capacity, self.config['maximum_tasks']) or
-                    self.pool.occupied('io', previous_io, ordinary_maximum)):
+                    self.pool.occupied('io', self.ordinary_capacity, ordinary_maximum)):
                 capacity, reason = self.capacity, 'waiting_for_drain'
             self.capacity = capacity
             ordinary = 1 if paused else max(1, math.ceil(
@@ -263,6 +263,7 @@ class Monitor:
                          active_io=self.pool.occupied('io', 0, ordinary_maximum) +
                          self.pool.occupied('progress', 0, self.config['progress_slots']))
             save(self.directory / 'state.json', state)
+            self.ordinary_capacity = ordinary
             with (self.directory / 'samples.jsonl').open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps(state, allow_nan=False) + '\n')
 

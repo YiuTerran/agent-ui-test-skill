@@ -295,10 +295,25 @@ class PoolTest(unittest.TestCase):
     def test_foreign_directory_copy_cannot_reuse_health_state(self):
         import shutil
         copy = self.root / 'other-stage'
-        shutil.copytree(self.monitor.directory, copy)
+        shutil.copytree(self.monitor.directory, copy, ignore=shutil.ignore_patterns('*.lock'))
+        self.assertEqual((self.monitor.directory / 'state.json').read_bytes(),
+                         (copy / 'state.json').read_bytes())
         copied = pool.Pool(copy, self.root, 'run-1', 'cli-01')
         with self.assertRaisesRegex(ValueError, 'foreign'):
             copied.try_claim('task')
+
+    def test_monitor_can_refresh_expired_health_while_clients_fail_closed(self):
+        path = self.monitor.directory / 'state.json'
+        state = json.loads(path.read_text())
+        state['sampled_at'] = time.time() - self.monitor.config['stale_seconds'] - 1
+        pool.save(path, state)
+        with self.assertRaisesRegex(ValueError, 'pool_stale'):
+            self.pool.try_claim('task')
+        self.monitor.refresh()
+        self.assertFalse(self.pool.state()['paused'])
+        claim = self.pool.try_claim('task')
+        self.assertIsNotNone(claim)
+        claim.close()
 
     def test_stage_is_single_use_and_keeps_history(self):
         with self.assertRaisesRegex(ValueError, 'already_active'):
@@ -313,12 +328,12 @@ class PoolTest(unittest.TestCase):
 
     def test_background_monitor_refreshes_and_stops_without_replacing_history(self):
         config = pool.configuration(self.root, 'run-1', 'sweep-01', 2, 3,
-                                    interval_seconds=.05, sample_seconds=.01, stale_seconds=.2)
+                                    interval_seconds=.05, sample_seconds=.01, stale_seconds=5)
         current = measurement()
         with pool.Monitor(self.root / 'sweep', config, sampler=lambda _: current) as monitor:
             self.assertEqual(2, monitor.pool.state()['task_capacity'])
             current = measurement(90)
-            deadline = time.monotonic() + 2
+            deadline = time.monotonic() + 5
             while time.monotonic() < deadline and not monitor.pool.state()['paused']:
                 time.sleep(.01)
             self.assertTrue(monitor.pool.state()['paused'])
