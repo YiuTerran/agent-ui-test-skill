@@ -35,6 +35,14 @@ def check_merge_launcher(wf, command):
     wf.report_artifacts.check_merge_launcher(command)
 
 
+def file_sha256(path):
+    checksum = hashlib.sha256()
+    with path.open('rb') as stream:
+        while chunk := stream.read(1024 * 1024):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
 def merge_reports(wf, project, state, request):
     wf.check(isinstance(request, dict), 'merge must be an object')
     command = request.get('command')
@@ -59,11 +67,11 @@ def merge_reports(wf, project, state, request):
         for index, name in enumerate(bundle['blob_reports']):
             source = wf.safe_path(project, name)
             expected = bundle['artifact_sha256'][name]
-            wf.check(hashlib.sha256(source.read_bytes()).hexdigest() == expected,
+            wf.check(file_sha256(source) == expected,
                      'merge input changed after collection: ' + name)
             target = inputs / f'{bid}-{index}.zip'
             shutil.copyfile(source, target)
-            wf.check(hashlib.sha256(target.read_bytes()).hexdigest() == expected, 'merge copy digest mismatch')
+            wf.check(file_sha256(target) == expected, 'merge copy digest mismatch')
     argv = command + ['merge-reports', '--reporter=html', str(inputs)]
     output = directory / 'playwright'
     env = dict(os.environ, PLAYWRIGHT_HTML_OPEN='never', PLAYWRIGHT_HTML_OUTPUT_DIR=str(output),
@@ -79,6 +87,8 @@ def merge_reports(wf, project, state, request):
               'ended_at': wf.now(), 'exit_code': process.returncode}
     wf.atomic(directory / 'command.json', report)
     wf.check(process.returncode == 0, 'offline merge failed; see ' + log.relative_to(project).as_posix())
+    wf.check((output / 'index.html').is_file(), 'offline merge HTML missing')
+    shutil.rmtree(inputs)
     return {'type': 'merged_report', 'report': report}
 
 
@@ -222,13 +232,24 @@ def dispatch(api, project, args):
     try:
         if args.command == 'attempt-collect':
             return attempt_collect(wf, project, args)
-        return finalize(wf, project, args)
+        result = finalize(wf, project, args)
     except subprocess.TimeoutExpired as error:
-        return {'valid': False, 'stage': 'offline_merge', 'released': False,
+        result = {'valid': False, 'stage': 'offline_merge', 'released': False,
                 'error': 'offline merge timed out; preserve merge.log and inspect remaining processes',
                 'timeout_seconds': error.timeout,
                 'evidence_directory': str(Path(error.cmd[-1]).parent.relative_to(project)),
                 'next_action': 'inspect_merge_without_business_rerun'}
     except (ValueError, KeyError, TypeError, AttributeError, IndexError, OSError) as error:
-        return {'valid': False, 'stage': args.command, 'released': False, 'error': str(error),
+        result = {'valid': False, 'stage': args.command, 'released': False, 'error': str(error),
                 'next_action': 'resolve_the_reported_input_or_evidence_without_business_rerun'}
+    if args.command == 'finalize':
+        try:
+            result['cache_budget'] = sibling('retention').enforce_cache_budget(project, args.run)
+            if not result['cache_budget']['within_budget']:
+                result.update(valid=False, stage='cache_budget',
+                              next_action=result['cache_budget']['next_action'])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            result.update(valid=False, stage='cache_budget',
+                          cache_budget={'within_budget': False, 'error': str(error)},
+                          next_action='resolve_cache_cleanup_without_business_rerun')
+    return result

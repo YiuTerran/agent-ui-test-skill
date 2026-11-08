@@ -294,14 +294,27 @@ config_path只选择调度配置和默认test_kind，不改变规范工作流元
 ```sh
 python3 <skill>/scripts/retention.py plan --project CANONICAL_PATH --scopes a,b --current-run RUN --output NEW_PLAN.json
 python3 <skill>/scripts/retention.py apply --project CANONICAL_PATH --input NEW_PLAN.json
+python3 <skill>/scripts/retention.py enforce --project CANONICAL_PATH --current-run RUN
 ```
+
+测试结束（成功、失败或中断完成安全teardown）立即检查整个`test/.cache`，上限5GiB（5×1024³字节）。`finalize`在释放工作流锁后执行，成功回执重放及报告检查失败也执行；直接runner和手动清理使用`enforce`。低于或等于上限只测量，不生成计划；超限按全部fixed scopes调用既有plan/apply，保留其安全检查及恢复证据保护，再复量。`before_regression=false`仅关闭运行前回收，结束容量门禁始终执行。`cache_budget`返回before_bytes/after_bytes/reclaimed_bytes/within_budget；仍超限时CLI退出2，finalize返回valid=false并保留真实released状态，完成修复后可重放，无须重跑业务。未分类、活跃或恢复证据不能为达容量指标猜删。
+
+容量计量逐项使用文件逻辑字节与可读取的已分配磁盘块字节较大值，并计入目录；Windows缺少块计量时使用文件逻辑字节。缓存回收按路径归属、引用、互斥锁及文件元数据执行，产物不读取内容、不重新计算SHA-256；以文件身份、大小、修改时间检查计划后替换和变化。已登记校验和作为registered_sha256原样保留，sha256=null明确表示回收未做内容校验；历史哈希计划继续兼容恢复。控制状态和计划摘要仍校验，merge在结果交付边界使用流式校验。保护引用建立路径索引，首次apply通过fresh selection复核集合，隔离前后及删除前核对元数据。
+
+容量扫描允许其他任务继续写缓存：扫描期间已消失或重命名的项跳过，新创建的项由后续扫描计入，因此单次读数不是原子快照。权限错误、软链接、重解析点和硬链接等安全检查仍报错；用于删除计划的目录清单保持严格校验，不使用容量扫描的容错模式。
+
+原生merge成功并确认HTML存在后，立即删除本次创建的`batch-*/input`临时blob副本；保留登记的原始blob、HTML及command.json。merge失败的输入保留供恢复，结束容量门禁按归属回收历史副本。runs下无state.json的旧smoke目录登记为unregistered_run_preserved并局部保留，不阻断其他有完整归属的历史回收。
+
+中断恢复run中，未登记为report bundle的`attempts/<id>/results/output/.playwright-artifacts-<数字>/`是原生临时工作目录；run已终态、无活跃占用且该attempt的command.json含结束时间和整数退出码时，允许回收其中未被证据引用的文件。当前run、活跃配额、显式引用及已登记恢复bundle继续保护；账本、原始报告及command.json保持可恢复。计划同时固定command回执，回执变化后须重新规划。
+
+POSIX目录刷盘按阶段去重：完成隔离后、回滚后及删除后各刷一次相关目录；控制日志仍原子写入并持久化。先落盘回收日志再释放隔离文件，异常退出在互斥锁内刷完已发生的目录变更，可用同一manifest继续恢复。
 
 project用真实规范路径，导出计划放项目test目录外；内部注册在`test/.cache/retention/plans`。apply仅接受同一已注册不可变计划，重核摘要、目录身份、控制状态及引用；输入/quota变化使计划失效后先核实再重建。按workflow→quota固定顺序持锁。
 
 | 规则 | 范围/结果 |
 | --- | --- |
 | 白名单 | 已结束非活跃run的attempts报告/blob/结果/附件、merged报告及不再需的sources/handoffs/discovery；Git资产不回收 |
-| 始终保护 | 当前/活跃/恢复run、有效baseline、显式审批及未核清业务资源必要恢复路径；池账本仍引用的基线及隔离证据（含disabled账号）也保护；保留state.json/summary.json/report.md/report.html/command.json |
+| 始终保护 | 当前/活跃run及恢复run必要证据（仅上述已结束未登记临时目录可回收）、有效baseline、显式审批及未核清业务资源必要恢复路径；池账本仍引用的基线及隔离证据（含disabled账号）也保护；保留state.json/summary.json/report.md/report.html/command.json |
 | 历史失败 | 产品/脚本/环境失败、未关issue、旧pending任务和绑定异常不单独保护大报告；保留原结论/小摘要，不要求先登记修复 |
 | 混合模块 | bundle/merged全部scope符合才回收；通用目录说明或.gitignore输出不是保护引用 |
 | 路径安全 | 路径逃逸、symlink、文件替换及Windows别名/句柄边界继续拒绝；无可靠归属/范围或白名单外局部保留，不用glob猜删 |
@@ -316,7 +329,7 @@ plan/apply的diagnostics包含candidate_files、selected_files、protected_files
 
 plan.cleanup_scan_seconds为扫描耗时；apply的timing.cleanup_scan_seconds保留原扫描，timing.cleanup_apply_seconds含复核、隔离和删除，不称纯unlink。同计划中断按manifest恢复；完成后幂等replayed=true返回首次计时，不重复累计，旧计划未计量项为null。
 
-日志在`test/.cache/retention/manifests`，保留路径/SHA-256/字节/模块/原因/时间、原runner统计及limitations。旧异常/不完整登记不能阻断其他可证明安全的回收；意外缺失不伪造删除记录。控制状态不可读、路径风险或文件被替换仍拒绝。公开API：make_plan/apply_plan，is_recycled/recycled_bundle为只读，不表示重跑/通过。回收后的报告口径见[历史报告](reports.md#历史报告与回收)。
+日志在`test/.cache/retention/manifests`，保留路径/文件元数据/已登记校验和/字节/模块/原因/时间、原runner统计及limitations。旧异常/不完整登记不能阻断其他可证明安全的回收；意外缺失不伪造删除记录。控制状态不可读、路径风险或文件被替换仍拒绝。公开API：make_plan/apply_plan，is_recycled/recycled_bundle为只读，不表示重跑/通过。回收后的报告口径见[历史报告](reports.md#历史报告与回收)。
 
 ### 批量结果候选
 

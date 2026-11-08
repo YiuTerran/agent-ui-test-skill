@@ -114,7 +114,7 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - 独立case及fixture内无依赖任务并行，共享资源按环境/账号/组织/配置/数据冲突组局部串行。Agent、case、独立sweep及内部I/O队列按[定时资源控制](references/resource-control.md)共享实测预算、分层扩缩，内部池不按case数量乘倍。默认30秒采样，CPU或内存达到80%暂停新增业务并逐步排空，两项低于60%且有任务和真实容量时扩容；缩容保留在途任务、命令回复及owned清理的推进能力，不强杀。实际领取容量与Attempt计划一致，teardown后释放；动态Agent模式跨UI/API共享实测容量，API worker不自动占浏览器。跨工程共用资源配置同一coordination.root、controller及冲突键；按实际接入层次报告扩缩容，不能只增加执行者数量便声称内部任务已经动态并行。
 - 工作流新run的`native_merge_required=true`：每个结果bundle必须绑定当前schema的Attempt计划及摘要、原始JSON和blob，正常同时生成HTML；完整绑定Setup、业务case、retry及未执行结果，最终合并全部结果blob并核验。直接执行的原始结果单独交付，不冒充已登记bundle或需求验收。中断产物不齐的调用独立登记仅回执，不计结果或完整性。JSON-only保留为旧run的受限兼容路径。失败、重跑后通过及未执行置前，不以缺失证据推断通过。
 - 新Attempt仅允许追加固定reporter/output参数，执行选择条件进入计划command。新run的完整验收必须满足`regression_completeness=complete`，覆盖绑定完整发现清单的收尾full及全部目标/分片；业务结果另行核验。缺少计划、full或目标时阻止完整验收，`not_declared`仅用于旧run；完整发现声明仍需真实命令审阅。
-- 默认每轮执行前回收相关模块旧报告；跨run续跑先显式保护仍被复用的原生产物，无法完整声明依赖时通过项目配置关闭自动回收，见[断点证据保护](references/checkpoints.md#跨run证据与回收)。只自动删除缓存白名单内安全归属明确的产物，保护当前run、有效审批/baseline及未核清资源恢复证据。回收记录不能改写历史结论。
+- 默认每轮执行前回收相关模块旧报告；跨run续跑先显式保护仍被复用的原生产物，无法完整声明依赖时通过项目配置关闭运行前自动回收，见[断点证据保护](references/checkpoints.md#跨run证据与回收)。测试结束或中断完成安全teardown后，立即检查整个`test/.cache`；超过5GiB（5×1024³字节）即执行安全回收，不等待下一轮，`retention.before_regression=false`仅控制运行前回收。`finalize`已内置结束检查，直接runner及手动清理须调用`retention.py enforce`。只删除白名单内安全归属明确的产物，保护当前/活跃run、有效审批/baseline及未核清资源恢复证据；受保护证据或未分类缓存使容量仍超限时，明确报告未达标及阻塞原因，继续恢复或分类处理。回收记录不能改写历史结论。
 - 明确区分覆盖与执行、UI与API、模拟与真机、local与CI。未知计时记`null`，不把等待空档归因为测试时间。
 
 ## 按需参考
@@ -133,11 +133,13 @@ MUST是不可省略的证据/安全约束；SHOULD是默认效率路径，有实
 - `scripts/resource_controller.py sample|step|watch`：实测CPU/内存，定时决策并通过宿主adapter安全增减Agent
 - `scripts/task_pool.py watch|hold`与`assets/task-pool-client.mjs`：在已领取预算内落实case、sweep及叶子I/O的跨进程共享准入；按[接入指引](references/resource-control.md#项目接入任务池)修改实际派发位置并验证，安装本身不启用项目并发
 - `scripts/source_cache.py capture|verify`：新来源导出后留指纹清单，后续有新观察时校验复用
-- `scripts/retention.py plan|apply`：手动预览/恢复；日常回归已由prepare-regression组合调用
+- `scripts/retention.py plan|apply|enforce`：手动预览/恢复及结束容量检查；日常回归由prepare-regression和finalize组合调用
 
 工作流脚本处理本地状态、配额、来源缓存、安全回收和报告核验，finalize还可执行本地Playwright离线合并，不直接执行产品测试或读取远端来源；独立资源控制器按显式adapter调用宿主增减Agent，执行与清理由项目runner负责。入口为`python3 <skill>/scripts/workflow.py`（Windows用`py -3`）。无类型`init`兼容补缺，带`--kind`的新suite初始化要求工作流资产不存在；已有UI资产用`migrate`。`doctor`只读诊断；`schema`查看输入字段。`record`/`collect-results`默认简报，`--full`按需展开；最终验收/报告仍完整核验。
 
 工作流元数据固定使用`test/spec.md`、`test/plans/coverage.json`和Git忽略的`test/.cache/`；`test/src/`只是新工程建议。已有测试、fixture、Playwright配置和命令cwd沿用项目布局，通过coverage的spec/plan、真实发现及Attempt的cwd绑定，不能为了接入搬迁代码。直接回归不要求初始化这些资产；调度配置与既有`test/spec.md`冲突时使用[config_path](references/contracts.md#双预算与就绪任务)，共享配额和残留索引仍使用同一PROJECT。
+
+缓存清理按归属、引用和文件元数据判断，删除中间产物时不重新读取内容计算SHA-256；目录刷盘按隔离、回滚和删除阶段批量执行。结果采集、业务资源恢复凭据及控制状态的校验沿用各自契约。
 
 ## 最小命令顺序
 
