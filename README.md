@@ -62,7 +62,7 @@ git clone https://github.com/YiuTerran/agent-ui-test-skill.git \
 
 UI 通常从前端工程接入，API 通常从后端工程接入，测试放本工程 `test/` 或已有测试工作区。Agent 按[首次接入引导](references/onboarding.md)识别实际配置与 cwd；纯黑盒也可使用独立测试工程。
 
-Agent会复用已有输入，集中补充需求来源、测试环境、身份和数据边界；后端源码可不提供。WPS工具仅在读取相应来源时需要，详见[WPS 365 插件仓库](https://github.com/YiuTerran/dsh-wps365-plugin)。按阶段检查依赖，沿用已有安装授权及宿主审批；人工认证只阻塞相关任务。
+Agent 会复用已有输入，集中补充需求来源、测试环境、身份和数据边界。后端源码可选。需求来源为 WPS 云文档时，使用 `wps-agent` 技能，通过 WPS Agent API Key 直接读取，无需额外安装 WPS CLI。安装与使用详见 [wps-agent-skill 仓库](https://github.com/YiuTerran/wps-agent-skill)。按阶段检查依赖，沿用已有安装授权及宿主审批。人工认证只阻塞相关任务。
 
 用户已明确要求补齐指定需求/模块内全部缺口时，直接以原始指令和证据登记当前清单；同一授权内的新缺口更新登记，范围不明确或越界时才征询。同一任务的技术新run核实授权仍有效后，以当前清单和原始授权证据重新登记，不自动继承旧事件或旧任务“仅本轮”的选择，见[授权复用与自动推进](references/workflow.md#授权复用与自动推进)。先验证代表流程及清理，再持续推进获准目标。
 
