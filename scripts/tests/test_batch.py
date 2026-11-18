@@ -64,6 +64,7 @@ class BatchTest(unittest.TestCase):
         with mock.patch.object(wf.subprocess, 'run', side_effect=AssertionError('must reuse existing artifacts')):
             result = self.finish()
         self.assertTrue(result['released'])
+        self.assertTrue(result['cache_budget']['within_budget'])
         self.assertIsNone(self.state()['claim'])
         self.assertEqual('checked', result['report_consistency'])
         self.assertEqual('complete', result['regression_completeness'])
@@ -110,6 +111,44 @@ class BatchTest(unittest.TestCase):
         self.assertTrue(second['replayed'])
         self.assertTrue(second['released'])
         self.assertEqual(before, self.snapshot())
+
+    def test_over_budget_finalize_preserves_release_and_recovers_by_replay(self):
+        at = self.prepared()
+        self.collect(at)
+        self.final_input()
+        large = self.project / 'test/.cache/unclassified-large.bin'
+        with large.open('wb') as stream:
+            stream.truncate(5 * 1024 ** 3 + 1)
+        result = self.finish(fail=True)
+        self.assertEqual('cache_budget', result['stage'])
+        self.assertTrue(result['released'])
+        self.assertFalse(result['cache_budget']['within_budget'])
+        self.assertTrue(large.exists())
+        self.assertIsNone(self.state()['claim'])
+        events = self.state()['events']
+        large.unlink()
+        replay = self.finish()
+        self.assertTrue(replay['replayed'])
+        self.assertTrue(replay['released'])
+        self.assertTrue(replay['cache_budget']['within_budget'])
+        self.assertEqual(events, self.state()['events'])
+
+    def test_failed_report_also_enforces_budget_without_releasing_claim(self):
+        at = self.prepared(full=False)
+        self.collect(at)
+        self.final_input()
+        large = self.project / 'test/.cache/unclassified-large.bin'
+        with large.open('wb') as stream:
+            stream.truncate(5 * 1024 ** 3 + 1)
+        result = self.finish(fail=True)
+        self.assertEqual('cache_budget', result['stage'])
+        self.assertFalse(result['released'])
+        self.assertFalse(result['cache_budget']['within_budget'])
+        self.assertIsNotNone(self.state()['claim'])
+        large.unlink()
+        result = self.finish(fail=True)
+        self.assertEqual('report_checks', result['stage'])
+        self.assertTrue(result['cache_budget']['within_budget'])
 
     def test_failed_finalization_accepts_revised_decision_without_replaying_receipts(self):
         at = self.prepared(full=False)
@@ -194,6 +233,7 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertTrue(result['released'])
         self.assertEqual(calls[0], self.state()['merged_report']['command'])
+        self.assertFalse(Path(calls[0][-1]).exists())
 
     def test_merge_launcher_accepts_local_playwright_forms_only(self):
         tools_module = __import__('importlib.util', fromlist=['util'])

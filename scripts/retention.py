@@ -33,6 +33,7 @@ _platform_spec.loader.exec_module(platform_support)
 
 RUNS = 'test/.cache/runs'
 STORE = 'test/.cache/retention'
+CACHE_LIMIT_BYTES = 5 * 1024 ** 3
 POOL_LEDGER = 'test/.cache/identity-pools.json'
 TERMINAL = {'fully_accepted', 'completed_with_failures', 'partially_blocked', 'aborted'}
 ROOT_SMALL = {'state.json', 'summary.json', 'report.md', 'report.html', 'retention-manifest.json'}
@@ -74,6 +75,7 @@ class PosixTree:
     def __init__(self, project):
         require('..' not in Path(project).parts, 'project path traversal')
         self.path = os.path.abspath(os.fspath(project))
+        self.dirty_directories = set()
         self.fd = os.open('/', DIR_FLAGS)
         try:
             for component in Path(self.path).parts[1:]:
@@ -86,6 +88,12 @@ class PosixTree:
 
     def close(self):
         os.close(self.fd)
+
+    def sync(self):
+        for directory in sorted(self.dirty_directories):
+            with self.parent(directory + '/.sync') as (parent, _):
+                os.fsync(parent)
+        self.dirty_directories.clear()
 
     @contextmanager
     def parent(self, value, create=False):
@@ -130,6 +138,31 @@ class PosixTree:
     def identity(info):
         return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
 
+    def fingerprint(self, value):
+        with self.parent(value) as (parent, name):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                before = os.fstat(fd)
+                require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1,
+                        'not a single-link regular file: ' + value)
+                checksum = hashlib.sha256()
+                length = 0
+                while chunk := os.read(fd, 1024 * 1024):
+                    checksum.update(chunk)
+                    length += len(chunk)
+                after = os.fstat(fd)
+                require(self.identity(before) == self.identity(after), 'file changed while reading: ' + value)
+                return dict(sha256=checksum.hexdigest(), bytes=length, identity=self.identity(after))
+            finally:
+                os.close(fd)
+
+    def metadata(self, value):
+        with self.parent(value) as (parent, name):
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                    'not a single-link regular file: ' + value)
+            return dict(sha256=None, bytes=info.st_size, identity=self.identity(info))
+
     def exists(self, value):
         try:
             with self.parent(value) as (fd, name):
@@ -139,23 +172,39 @@ class PosixTree:
         except FileNotFoundError:
             return False
 
-    def walk(self, value):
+    def size(self, value):
+        with self.parent(value) as (fd, name):
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            require(stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1),
+                    'unsupported file: ' + value)
+            return max(info.st_size, getattr(info, 'st_blocks', 0) * 512)
+
+    def walk(self, value, missing_ok=False):
         """Inventory names too: additions/empty directory swaps invalidate a plan."""
         result = {}
-        with self.parent(value) as (parent, name):
-            fd = os.open(name, DIR_FLAGS, dir_fd=parent)
+        try:
+            with self.parent(value) as (parent, name):
+                fd = os.open(name, DIR_FLAGS, dir_fd=parent)
+        except FileNotFoundError:
+            if missing_ok:
+                return result
+            raise
         try:
             result[value + '/'] = list(self.identity(os.fstat(fd))[:2])
             for name in sorted(os.listdir(fd)):
-                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                path = value + '/' + name
-                require(not stat.S_ISLNK(info.st_mode), 'symlink: ' + path)
-                if stat.S_ISDIR(info.st_mode):
-                    result.update(self.walk(path))
-                else:
-                    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
-                            'unsupported file type: ' + path)
-                    result[path] = None
+                try:
+                    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    path = value + '/' + name
+                    require(not stat.S_ISLNK(info.st_mode), 'symlink: ' + path)
+                    if stat.S_ISDIR(info.st_mode):
+                        result.update(self.walk(path, missing_ok=missing_ok))
+                    else:
+                        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+                                'unsupported file type: ' + path)
+                        result[path] = None
+                except FileNotFoundError:
+                    if not missing_ok:
+                        raise
             return result
         finally:
             os.close(fd)
@@ -200,24 +249,25 @@ class PosixTree:
     def move(self, source, target, expected=None):
         with self.parent(source) as (src, name), self.parent(target, create=True) as (dst, stage):
             if expected:
-                require(self.read(source)[1] == expected, 'artifact changed before staging: ' + source)
+                actual = self.metadata(source) if expected['sha256'] is None else self.fingerprint(source)
+                require(actual == expected, 'artifact changed before staging: ' + source)
             require(not self.exists(target), 'move target exists')
             os.rename(name, stage, src_dir_fd=src, dst_dir_fd=dst)
-            os.fsync(src)
-            os.fsync(dst)
+            self.dirty_directories.update(('/'.join(parts(source)[:-1]), '/'.join(parts(target)[:-1])))
 
     def restore(self, source, target):
         with self.parent(source) as (src, name), self.parent(target) as (dst, stage):
             os.link(name, stage, src_dir_fd=src, dst_dir_fd=dst, follow_symlinks=False)
             os.unlink(name, dir_fd=src)
-            os.fsync(src)
-            os.fsync(dst)
+            self.dirty_directories.update(('/'.join(parts(source)[:-1]), '/'.join(parts(target)[:-1])))
 
-    def delete(self, value, expected_hash):
-        require(self.read(value)[1]['sha256'] == expected_hash, 'quarantine artifact changed')
+    def delete(self, value, expected):
+        actual = self.metadata(value) if expected['sha256'] is None else self.fingerprint(value)
+        require(actual['sha256'] == expected['sha256'] and actual['bytes'] == expected['bytes']
+                and actual['identity'][:4] == expected['identity'][:4], 'quarantine artifact changed')
         with self.parent(value) as (fd, name):
             os.unlink(name, dir_fd=fd)
-            os.fsync(fd)
+            self.dirty_directories.add('/'.join(parts(value)[:-1]))
 
 
 class WindowsTree:
@@ -231,6 +281,9 @@ class WindowsTree:
 
     def close(self):
         self.root.__exit__(None, None, None)
+
+    def sync(self):
+        return None
 
     @contextmanager
     def parent(self, value, create=False):
@@ -256,6 +309,30 @@ class WindowsTree:
             with self.files.child(parent, name, access=self.files.READ, directory=False) as handle:
                 return self.stamp(handle)
 
+    def fingerprint(self, value):
+        with self.parent(value) as (parent, name):
+            with self.files.child(parent, name, access=self.files.READ, directory=False) as handle:
+                before = self.files.info(handle)
+                checksum = hashlib.sha256()
+                length = 0
+                with self.files.descriptor(handle, os.O_RDONLY) as fd:
+                    while chunk := os.read(fd, 1024 * 1024):
+                        checksum.update(chunk)
+                        length += len(chunk)
+                    after = self.files.info(handle)
+                    require(before == after, 'file changed while reading: ' + value)
+                return dict(sha256=checksum.hexdigest(), bytes=length, identity=after['identity'])
+
+    def metadata_stamp(self, handle):
+        info = self.files.info(handle)
+        require(not info['directory'], 'not a regular file')
+        return dict(sha256=None, bytes=info['identity'][2], identity=info['identity'])
+
+    def metadata(self, value):
+        with self.parent(value) as (parent, name):
+            with self.files.child(parent, name, access=self.files.READ, directory=False) as handle:
+                return self.metadata_stamp(handle)
+
     def exists(self, value):
         try:
             with self.parent(value) as (parent, name):
@@ -264,21 +341,35 @@ class WindowsTree:
         except FileNotFoundError:
             return False
 
-    def walk(self, value):
+    def size(self, value):
+        with self.parent(value) as (parent, name):
+            with self.files.child(parent, name, access=self.files.READ) as handle:
+                info = self.files.info(handle)
+                return 0 if info['directory'] else info['identity'][2]
+
+    def walk(self, value, missing_ok=False):
         result = {}
         def visit(handle, path):
             result[path + '/'] = self.files.info(handle)['identity'][:2]
             for name in sorted(self.files.names(handle)):
                 child_value = path + '/' + name
                 parts(child_value)
-                with self.files.child(handle, name, access=self.files.READ) as child:
-                    if self.files.info(child)['directory']:
-                        visit(child, child_value)
-                    else:
-                        result[child_value] = None
-        with self.parent(value) as (parent, name):
-            with self.files.child(parent, name, access=self.files.READ, directory=True) as handle:
-                visit(handle, value)
+                try:
+                    with self.files.child(handle, name, access=self.files.READ) as child:
+                        if self.files.info(child)['directory']:
+                            visit(child, child_value)
+                        else:
+                            result[child_value] = None
+                except FileNotFoundError:
+                    if not missing_ok:
+                        raise
+        try:
+            with self.parent(value) as (parent, name):
+                with self.files.child(parent, name, access=self.files.READ, directory=True) as handle:
+                    visit(handle, value)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
         return result
 
     def write(self, value, data, exclusive=False):
@@ -318,17 +409,20 @@ class WindowsTree:
             with self.files.child(src, name, access=self.files.READ | self.files.DELETE,
                                   directory=False) as handle:
                 if expected:
-                    require(self.stamp(handle)[1] == expected, 'artifact changed before staging: ' + source)
+                    actual = self.metadata_stamp(handle) if expected['sha256'] is None else self.stamp(handle)[1]
+                    require(actual == expected, 'artifact changed before staging: ' + source)
                 self.files.rename_child(handle, dst, stage)
 
     def restore(self, source, target):
         self.move(source, target)
 
-    def delete(self, value, expected_hash):
+    def delete(self, value, expected):
         with self.parent(value) as (parent, name):
             with self.files.child(parent, name, access=self.files.READ | self.files.DELETE,
                                   directory=False) as handle:
-                require(self.stamp(handle)[1]['sha256'] == expected_hash, 'quarantine artifact changed')
+                actual = self.metadata_stamp(handle) if expected['sha256'] is None else self.stamp(handle)[1]
+                require(actual['sha256'] == expected['sha256'] and actual['bytes'] == expected['bytes']
+                        and actual['identity'][:4] == expected['identity'][:4], 'quarantine artifact changed')
                 self.files.delete(handle)
 
 
@@ -341,7 +435,10 @@ def locked(project):
     try:
         # One lock order on both platforms; scheduling never takes workflow.lock.
         with tree.lock('test/.cache/workflow.lock'), tree.lock('test/.cache/scheduling/quota.lock'):
-            yield tree
+            try:
+                yield tree
+            finally:
+                tree.sync()
     finally:
         tree.close()
 
@@ -529,6 +626,22 @@ def under(path, parent):
     return path == parent or path.startswith(parent + '/')
 
 
+def reference_index(refs):
+    result = {}
+    for index, (reference, origin) in enumerate(refs):
+        result.setdefault(path_key(reference), []).append((index, reference, origin))
+    return result
+
+
+def matching_reference(path, indexed):
+    key = path_key(path)
+    prefixes = {key}
+    prefixes.update(key[:index] for index, character in enumerate(key) if character in '/ ')
+    matches = [entry for prefix in prefixes for entry in indexed.get(prefix, [])
+               if not (entry[2] and under(path, entry[2]))]
+    return min(matches)[1] if matches else None
+
+
 def deletable(path):
     names = parts(path)
     require(len(names) >= 6 and names[:3] == ['test', '.cache', 'runs'], 'outside retention whitelist')
@@ -548,6 +661,13 @@ def small_artifact(names):
             or (len(names) == 7 and names[4] == 'attempts' and names[6] == 'command.json'))
 
 
+def native_workspace(path):
+    names = path.split('/')
+    return (len(names) >= 10 and names[:3] == ['test', '.cache', 'runs']
+            and names[4] == 'attempts' and names[6:8] == ['results', 'output']
+            and re.fullmatch(r'\.playwright-artifacts-\d+', names[8]) is not None)
+
+
 class Snapshot:
     def __init__(self, tree):
         self.tree = tree
@@ -563,6 +683,10 @@ class Snapshot:
 
     def json(self, path):
         return json.loads(self.read(path))
+
+    def stamp(self, path):
+        self.guards[path] = self.tree.metadata(path)
+        return self.guards[path]
 
 
 RESOLVED_RESOURCES = {'absence_verified', 'retained_verified'}
@@ -686,6 +810,9 @@ def selection(tree, scopes, current_run=None, previously=None):
     run_dirs = sorted(p for p in inventory if p.endswith('/') and len(p.split('/')) == 5)
     for directory in run_dirs:
         rid = identifier(directory.rstrip('/').split('/')[-1])
+        if not tree.exists(directory + 'state.json'):
+            limitations.append({'reason': 'unregistered_run_preserved', 'path': directory})
+            continue
         state = snap.json(directory + 'state.json')
         require(isinstance(state, dict) and state.get('run_id') == rid, 'invalid run state: ' + rid)
         scopes_of(state.get('scopes'))
@@ -699,8 +826,11 @@ def selection(tree, scopes, current_run=None, previously=None):
     eligible = {rid for rid, state in states.items() if state['acceptance'] in TERMINAL
                 and not active(state) and not state.get('recovery_required') and rid != current_run
                 and rid not in reserved_runs}
+    scratch_runs = {rid for rid, state in states.items() if state['acceptance'] in TERMINAL
+                    and not active(state) and rid != current_run and rid not in reserved_runs}
     if external_coordination:
         eligible.clear()
+        scratch_runs.clear()
     bundles = {}
     for rid, state in states.items():
         prefix = RUNS + '/' + rid
@@ -809,8 +939,14 @@ def selection(tree, scopes, current_run=None, previously=None):
                 add_ref(prefix, prefix + '/state.json', '/humans',
                         'approval_evidence_unmapped')
         if rid not in eligible:
-            add_ref(prefix, prefix + '/state.json', '/acceptance',
-                    'current_active_or_unfinished_run')
+            if rid in scratch_runs:
+                for bid in state.get('report_bundles', {}):
+                    identifier(bid)
+                    add_ref(prefix + '/attempts/' + bid, prefix + '/state.json',
+                            '/report_bundles/' + bid, 'registered_recovery_bundle')
+            else:
+                add_ref(prefix, prefix + '/state.json', '/acceptance',
+                        'current_active_or_unfinished_run')
             continue
         for bid, bundle in state.get('report_bundles', {}).items():
             try:
@@ -845,7 +981,7 @@ def selection(tree, scopes, current_run=None, previously=None):
             if not isinstance(tracked, dict):
                 tracked = {}
                 limitations.append(dict(run_id=rid, bundle_id=bid, reason='historical_bundle_registration_incomplete'))
-            actual_hashes = {}
+            registered_hashes = {}
             missing = []
             for path, sha in tracked.items():
                 if not isinstance(path, str):
@@ -877,14 +1013,11 @@ def selection(tree, scopes, current_run=None, previously=None):
                                             reason='historical_artifact_hash_invalid', paths=[path]))
                     continue
                 if tree.exists(path):
-                    actual = hashlib.sha256(snap.read(path)).hexdigest()
-                    actual_hashes[path] = actual
-                    if actual != sha:
-                        limitations.append(dict(run_id=rid, bundle_id=bid,
-                                                reason='historical_artifact_hash_mismatch', paths=[path]))
+                    snap.stamp(path)
+                    registered_hashes[path] = sha
                 else:
-                    if previously and previously.get(path, {}).get('sha256') == sha:
-                        actual_hashes[path] = sha
+                    if previously and recorded_checksum(previously.get(path, {})) == sha:
+                        registered_hashes[path] = sha
                     else:
                         missing.append(path)
             if missing:
@@ -918,7 +1051,7 @@ def selection(tree, scopes, current_run=None, previously=None):
                                    business_targets=bundle.get('business_targets'),
                                    business_attempts=bundle.get('business_attempts'),
                                    raw_business_skipped=bundle.get('raw_business_skipped'),
-                                   artifact_sha256=actual_hashes,
+                                   artifact_sha256=registered_hashes,
                                    missing_unrecovered=bool(missing))
     merge_recyclable = set()
 
@@ -987,9 +1120,8 @@ def selection(tree, scopes, current_run=None, previously=None):
             if not isinstance(sha, str) or not HEX.fullmatch(sha):
                 limitations.append(dict(run_id=rid, reason='historical_merged_artifact_hash_invalid',
                                         paths=[path]))
-            elif tree.exists(path) and hashlib.sha256(snap.read(path)).hexdigest() != sha:
-                limitations.append(dict(run_id=rid, reason='historical_merged_artifact_hash_mismatch',
-                                        paths=[path]))
+            elif tree.exists(path):
+                snap.stamp(path)
         html_path = merged.get('html_report')
         if isinstance(html_path, str):
             if any(char in html_path for char in '*?[]'):
@@ -1055,10 +1187,12 @@ def selection(tree, scopes, current_run=None, previously=None):
     # One deterministic explanation per matched prefix; avoid rechecking duplicate
     # references from state/event mirrors for every historical attachment.
     refs = list(dict.fromkeys(refs))
+    indexed_refs = reference_index(refs)
     files = []
     candidates = set()
     protected = {}
     excluded = {}
+    scratch_commands = {}
 
     def exclude(reason):
         excluded[reason] = excluded.get(reason, 0) + 1
@@ -1069,9 +1203,20 @@ def selection(tree, scopes, current_run=None, previously=None):
         names = path.split('/')
         if len(names) < 6 or small_artifact(names):
             continue
-        if names[3] not in eligible:
+        scratch = native_workspace(path) and names[3] in scratch_runs
+        if names[3] not in eligible and not scratch:
             exclude('current_active_or_unfinished_run')
             continue
+        if scratch:
+            command_path = '/'.join(names[:6]) + '/command.json'
+            if command_path not in scratch_commands:
+                receipt = snap.json(command_path) if tree.exists(command_path) else {}
+                scratch_commands[command_path] = (isinstance(receipt, dict)
+                                                 and bool(receipt.get('ended_at'))
+                                                 and type(receipt.get('exit_code')) is int)
+            if not scratch_commands[command_path]:
+                exclude('native_workspace_without_terminal_command')
+                continue
         state = states[names[3]]
         bundle = None
         if names[4] == 'attempts' and names[5].startswith('.'):
@@ -1108,19 +1253,19 @@ def selection(tree, scopes, current_run=None, previously=None):
             exclude('outside_selected_modules_or_whitelist')
             continue
         candidates.add(path)
-        match = next((ref for ref, origin in refs
-                      if (under(path, ref) or path_key(path).startswith(path_key(ref) + ' '))
-                      and not (origin and under(path, origin))), None)
+        match = matching_reference(path, indexed_refs)
         if match is not None:
             key = path_key(match)
             item = protected.setdefault(key, dict(reference=origins[key], paths=set()))
             item['paths'].add(path)
             continue
         deletable(path)
-        snap.read(path)
+        snap.stamp(path)
         files.append(dict(path=path, **snap.guards[path], scopes=fscopes,
+                          registered_sha256=bundle['artifact_sha256'].get(path) if bundle else None,
                           run_id=names[3], bundle_id=bundle['bundle_id'] if bundle else None,
-                          reason='ended_inactive_history' if bundle else 'unreferenced_temporary'))
+                          reason='ended_native_workspace' if scratch else
+                          'ended_inactive_history' if bundle else 'unreferenced_temporary'))
     selected = {f['path'] for f in files}
     diagnostics = candidate_diagnostics(candidates, selected, protected, excluded)
     markers = []
@@ -1130,7 +1275,7 @@ def selection(tree, scopes, current_run=None, previously=None):
         payloads = sorted({p for p in list(inventory) + list(old)
                            if under(p, prefix) and not p.endswith('/') and not small_artifact(p.split('/'))})
         complete = not bundle.get('missing_unrecovered') and all(
-            p in selected or old.get(p, {}).get('sha256') == sha
+            p in selected or recorded_checksum(old.get(p, {})) == sha
             for p, sha in bundle['artifact_sha256'].items())
         complete = complete and all(p in selected or p in old for p in payloads)
         markers.append(dict(bundle, complete=complete, payload_paths=payloads))
@@ -1139,6 +1284,10 @@ def selection(tree, scopes, current_run=None, previously=None):
                 scheduling_guard=scheduling_guard,
                 pool_guard=pool_guard,
                 guards=snap.guards, inventory=dict(inventory, **assets))
+
+
+def recorded_checksum(record):
+    return record.get('registered_sha256') or record.get('sha256')
 
 
 def plan_body(plan):
@@ -1209,19 +1358,24 @@ def make_plan(project, scopes, current_run=None):
         return plan
 
 
-def verify_snapshot(tree, plan):
+def verify_ledger_guards(tree, plan):
     quota_path = 'test/.cache/scheduling/quota.json'
     guard = tree.read(quota_path)[1] if tree.exists(quota_path) else None
     require(guard == plan.get('scheduling_guard'), 'scheduling reservations changed; create a new plan')
     pool_guard = tree.read(POOL_LEDGER)[1] if tree.exists(POOL_LEDGER) else None
     require(pool_guard == plan.get('pool_guard'), 'identity pool ledger changed; create a new plan')
+
+
+def verify_snapshot(tree, plan):
+    verify_ledger_guards(tree, plan)
     inventory = tree.walk(RUNS) if tree.exists(RUNS) else {}
     inventory.update(tree.walk('test/plans'))
     # Directory names/inodes and all files must still agree; deletion by this
     # transaction is the sole permissible difference on crash recovery.
     require(inventory == plan['inventory'], 'project inventory changed; create a new plan')
     for path, stamp in plan['guards'].items():
-        require(tree.read(path)[1] == stamp, 'protected state/reference or artifact changed: ' + path)
+        actual = tree.metadata(path) if stamp['sha256'] is None else tree.fingerprint(path)
+        require(actual == stamp, 'protected state/reference or artifact changed: ' + path)
 
 
 def quarantine(tree, original, target):
@@ -1230,7 +1384,7 @@ def quarantine(tree, original, target):
     expected = {k: original[k] for k in ('sha256', 'bytes', 'identity')}
     tree.move(path, target, expected)
     try:
-        data, stamp = tree.read(target)
+        stamp = tree.metadata(target) if original['sha256'] is None else tree.fingerprint(target)
         require(stamp['sha256'] == original['sha256'] and stamp['bytes'] == original['bytes']
                 and stamp['identity'][:4] == original['identity'][:4], 'artifact replaced during staging: ' + path)
     except BaseException:
@@ -1253,7 +1407,7 @@ def apply_plan(project, plan):
             manifest = load(tree, mpath)
             valid_manifest(tree, manifest)
         else:
-            verify_snapshot(tree, plan)
+            verify_ledger_guards(tree, plan)
             fresh = selection(tree, plan['scopes'], plan['current_run'], recycled_records(tree))
             require(all(value == plan.get(key) for key, value in fresh.items()
                         if key != 'diagnostics' or key in plan),
@@ -1296,9 +1450,10 @@ def apply_plan(project, plan):
                     quarantine(tree, original, stage)
                 staged.append((original, stage))
                 if already_staged:
-                    data, stamp = tree.read(stage)
+                    stamp = tree.metadata(stage) if original['sha256'] is None else tree.fingerprint(stage)
                     require(stamp['sha256'] == original['sha256'] and stamp['bytes'] == original['bytes']
                             and stamp['identity'][:4] == original['identity'][:4], 'quarantine artifact changed')
+            tree.sync()
             removed = {f['path'] for f in plan['files']}
             expected['inventory'] = {p: v for p, v in plan['inventory'].items() if p not in removed}
             expected['guards'] = {p: v for p, v in plan['guards'].items() if p not in removed}
@@ -1306,6 +1461,7 @@ def apply_plan(project, plan):
         except BaseException:
             for original, stage in reversed(staged):
                 restore(tree, original, stage)
+            tree.sync()
             raise
         for original, stage in staged:
             manifest['files'][original['path']].update(status='deleted', recycled_at=now())
@@ -1317,7 +1473,8 @@ def apply_plan(project, plan):
             stage = STORE + '/quarantine/' + pid + '/' + str(index)
             if tree.exists(stage):
                 # delete() verifies the bytes with the same backend before unlink.
-                tree.delete(stage, original['sha256'])
+                tree.delete(stage, original)
+        tree.sync()
         manifest['completed_at'] = manifest['completed_at'] or now()
         if not replayed:
             manifest['timing'] = dict(cleanup_scan_seconds=plan.get('cleanup_scan_seconds'),
@@ -1386,7 +1543,7 @@ def recycled_bundle(project, run_id, bundle_id):
             for bundle in manifest['bundles']:
                 if (bundle['run_id'] == run_id and bundle['bundle_id'] == bundle_id and bundle['complete']
                         and all(p in records for p in bundle.get('payload_paths', []))
-                        and all(records.get(p, {}).get('sha256') == sha for p, sha in bundle['artifact_sha256'].items())):
+                        and all(recorded_checksum(records.get(p, {})) == sha for p, sha in bundle['artifact_sha256'].items())):
                     return dict(bundle, recycled=True, plan_id=manifest['plan_id'],
                                 recycled_at=manifest['completed_at'])
         return None
@@ -1405,6 +1562,51 @@ def external_read(path):
         return json.loads(tree.read(Path(absolute).name)[0])
     finally:
         tree.close()
+
+
+def cache_bytes(project):
+    tree = Tree(project)
+    try:
+        if not tree.exists('test/.cache'):
+            return 0
+        total = 0
+        for path in tree.walk('test/.cache', missing_ok=True):
+            try:
+                total += tree.size(path.rstrip('/'))
+            except FileNotFoundError:
+                continue
+        return total
+    finally:
+        tree.close()
+
+
+def enforce_cache_budget(project, current_run=None, limit_bytes=CACHE_LIMIT_BYTES):
+    require(type(limit_bytes) is int and limit_bytes > 0, 'cache limit must be a positive integer')
+    before = cache_bytes(project)
+    result = dict(limit_bytes=limit_bytes, before_bytes=before, after_bytes=before,
+                  reclaimed_bytes=0, triggered=before > limit_bytes, within_budget=before <= limit_bytes)
+    if not result['triggered']:
+        return result
+    tree = Tree(project)
+    try:
+        text = tree.read('test/spec.md')[0].decode('utf-8')
+        blocks = re.findall(r'```json workflow-config\s*\n(.*?)\n```', text, re.S)
+        require(len(blocks) == 1, 'invalid workflow-config')
+        scopes = scopes_of(json.loads(blocks[0])['scope']['fixed'])
+    finally:
+        tree.close()
+    plan = make_plan(project, scopes, current_run)
+    applied = apply_plan(project, plan)
+    after = cache_bytes(project)
+    diagnostics = plan['diagnostics']
+    compact = {key: value for key, value in diagnostics.items() if key != 'protections'}
+    compact['protection_sources'] = len(diagnostics.get('protections', []))
+    result.update(after_bytes=after, reclaimed_bytes=max(0, before - after),
+                  within_budget=after <= limit_bytes, plan_id=plan['plan_id'],
+                  deleted_files=applied['files'], diagnostics=compact)
+    if not result['within_budget']:
+        result['next_action'] = 'resolve_protected_or_unclassified_cache_then_enforce_again'
+    return result
 
 
 def export_plan(path, plan):
@@ -1430,6 +1632,9 @@ def main(argv=None):
     cmd = commands.add_parser('apply')
     cmd.add_argument('--project', required=True)
     cmd.add_argument('--input', required=True)
+    cmd = commands.add_parser('enforce')
+    cmd.add_argument('--project', required=True)
+    cmd.add_argument('--current-run')
     args = parser.parse_args(argv)
     try:
         require('..' not in Path(args.project).parts, 'project path traversal')
@@ -1440,10 +1645,12 @@ def main(argv=None):
                           files=len(plan['files']), bytes=sum(f['bytes'] for f in plan['files']),
                           diagnostics=plan['diagnostics'],
                           cleanup_scan_seconds=plan['cleanup_scan_seconds'])
-        else:
+        elif args.command == 'apply':
             result = apply_plan(Path(args.project).resolve(strict=True), external_read(args.input))
+        else:
+            result = enforce_cache_budget(Path(args.project).resolve(strict=True), args.current_run)
         print(json.dumps(result, ensure_ascii=True))
-        return 0
+        return 0 if result.get('within_budget', True) else 2
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         result = {'error': str(error)}
         if isinstance(error, CleanupCandidateMismatch):

@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,147 @@ class RetentionTest(unittest.TestCase):
     def issue(self, status='open'):
         self.state['issues']['I'] = dict(issue_id='I', status=status, affected_case_ids=['C1'])
 
+    def test_unregistered_smoke_directory_preserved_without_blocking_history(self):
+        self.write(r.RUNS + '/smoke/attempts/login/results/receipt.json', {'exit_code': 0})
+        plan = self.plan()
+        self.assertIn(self.trace, self.paths(plan))
+        self.assertFalse(any('/smoke/' in path for path in self.paths(plan)))
+        r.apply_plan(self.project, plan)
+        self.assertTrue((self.project / (r.RUNS + '/smoke/attempts/login/results/receipt.json')).exists())
+
+    def test_reference_index_preserves_first_match_and_origin_exclusions(self):
+        refs = [('test/.cache/runs/old', 'test/.cache/runs/old/attempts'),
+                ('test/.cache/runs/old/attempts/B', None),
+                ('test/.cache/runs/old', None),
+                ('test/.cache/runs/other/file', None)]
+        indexed = r.reference_index(refs)
+        for path in [self.trace, self.prefix + '/sources/manifest.json',
+                     'test/.cache/runs/other/file annotated/path',
+                     'test/.cache/runs/other/fileX', 'unrelated']:
+            expected = next((ref for ref, origin in refs
+                             if (r.under(path, ref) or r.path_key(path).startswith(r.path_key(ref) + ' '))
+                             and not (origin and r.under(path, origin))), None)
+            self.assertEqual(expected, r.matching_reference(path, indexed))
+
+    def test_artifact_metadata_does_not_read_hash_or_cache_payload(self):
+        with r.locked(self.project) as tree:
+            snapshot = r.Snapshot(tree)
+            with mock.patch.object(tree, 'read', side_effect=AssertionError('payload must not be read')), \
+                    mock.patch.object(tree, 'fingerprint', side_effect=AssertionError('payload must not be hashed')):
+                stamp = snapshot.stamp(self.trace)
+            self.assertIsNone(stamp['sha256'])
+            self.assertEqual((self.project / self.trace).stat().st_size, stamp['bytes'])
+            self.assertNotIn(self.trace, snapshot.cache)
+
+    def test_cache_budget_below_limit_does_not_plan_or_write(self):
+        before = r.cache_bytes(self.project)
+        with mock.patch.object(r, 'make_plan', side_effect=AssertionError('unexpected plan')):
+            result = r.enforce_cache_budget(self.project, limit_bytes=before)
+        self.assertFalse(result['triggered'])
+        self.assertTrue(result['within_budget'])
+
+    @contextlib.contextmanager
+    def mutate_cache_listing(self, marker, mutation):
+        owner, method = ((r.platform_support.WindowsFiles, 'names') if os.name == 'nt'
+                         else (r.os, 'listdir'))
+        original = getattr(owner, method)
+        changed = []
+
+        def listing(*args):
+            names = list(original(*args))
+            if marker in names and not changed:
+                mutation()
+                changed.append(True)
+            return names
+
+        with mock.patch.object(owner, method, autospec=True, side_effect=listing):
+            yield
+        self.assertTrue(changed)
+
+    def test_cache_budget_tolerates_atomic_rename_during_listing(self):
+        pending = self.project / 'test/.cache/.budget-race'
+        pending.write_text('pending state')
+        with self.mutate_cache_listing(pending.name, lambda: pending.replace(pending.with_name('state.json'))):
+            result = r.enforce_cache_budget(self.project)
+        self.assertTrue(result['within_budget'])
+        self.assertFalse(result['triggered'])
+        self.assertGreater(r.cache_bytes(self.project), 0)
+
+    def test_cache_budget_tolerates_directory_removal_during_listing(self):
+        self.write('test/.cache/.budget-race/nested/output', 'temporary output')
+        directory = self.project / 'test/.cache/.budget-race'
+        with self.mutate_cache_listing(directory.name, lambda: shutil.rmtree(directory)):
+            result = r.enforce_cache_budget(self.project)
+        self.assertTrue(result['within_budget'])
+        self.assertFalse(directory.exists())
+
+    def test_cache_budget_includes_concurrent_creation_on_next_scan(self):
+        marker = self.project / 'test/.cache/.budget-race'
+        marker.write_text('marker')
+        created = marker.with_name('new-output')
+        with self.mutate_cache_listing(marker.name, lambda: created.write_bytes(b'x' * 65536)):
+            during = r.cache_bytes(self.project)
+        self.assertGreaterEqual(r.cache_bytes(self.project), during + created.stat().st_size)
+
+    def test_cache_budget_tolerates_removal_after_inventory(self):
+        target = self.project / self.noise
+        original = r.Tree.walk
+
+        def inventory(tree, path, *args, **kwargs):
+            result = original(tree, path, *args, **kwargs)
+            if path == 'test/.cache':
+                target.unlink()
+            return result
+
+        with mock.patch.object(r.Tree, 'walk', autospec=True, side_effect=inventory):
+            result = r.enforce_cache_budget(self.project)
+        self.assertTrue(result['within_budget'])
+
+    def test_retention_inventory_still_rejects_concurrent_removal(self):
+        target = self.project / 'test/.cache/.budget-race'
+        target.write_text('temporary state')
+        with self.mutate_cache_listing(target.name, target.unlink):
+            tree = r.Tree(self.project)
+            try:
+                with self.assertRaises(FileNotFoundError):
+                    tree.walk('test/.cache')
+            finally:
+                tree.close()
+
+    def test_cache_budget_does_not_suppress_permission_errors(self):
+        with mock.patch.object(r.Tree, 'size', side_effect=PermissionError('denied')):
+            with self.assertRaises(PermissionError):
+                r.enforce_cache_budget(self.project)
+
+    def test_cache_budget_still_rejects_hardlinks(self):
+        os.link(self.project / self.noise, self.project / 'test/.cache/.budget-race')
+        with self.assertRaises(ValueError):
+            r.enforce_cache_budget(self.project)
+
+    def test_cache_budget_reclaims_history_even_when_pre_regression_disabled(self):
+        self.spec['retention'] = {'before_regression': False}
+        self.write('test/spec.md', '```json workflow-config\n' + json.dumps(self.spec) + '\n```\n')
+        self.write(self.noise, 'x' * 200000)
+        before = r.cache_bytes(self.project)
+        result = r.enforce_cache_budget(self.project, limit_bytes=before - 100000)
+        self.assertTrue(result['triggered'])
+        self.assertTrue(result['within_budget'])
+        self.assertFalse((self.project / self.noise).exists())
+        self.assertTrue((self.project / (self.prefix + '/state.json')).exists())
+
+    def test_cache_budget_preserves_current_run_and_reports_remaining_excess(self):
+        result = r.enforce_cache_budget(self.project, current_run='old', limit_bytes=1)
+        self.assertFalse(result['within_budget'])
+        self.assertEqual(0, result['deleted_files'])
+        self.assertTrue((self.project / self.trace).exists())
+        self.assertIn('next_action', result)
+
+    def test_cache_budget_measures_unclassified_files_without_deleting_them(self):
+        self.write('test/.cache/unknown/session.json', 'private' * 10000)
+        result = r.enforce_cache_budget(self.project, limit_bytes=100)
+        self.assertFalse(result['within_budget'])
+        self.assertTrue((self.project / 'test/.cache/unknown/session.json').exists())
+
     def test_full_recycle_keeps_state_summary_command_and_counts(self):
         plan = self.plan()
         before = (self.project / (self.prefix + '/state.json')).read_bytes()
@@ -116,9 +258,52 @@ class RetentionTest(unittest.TestCase):
         manifest = json.loads((self.project / result['manifest']).read_text(encoding='utf-8'))
         for path, item in manifest['files'].items():
             self.assertEqual(path, item['original']['path'])
-            self.assertEqual(64, len(item['original']['sha256']))
+            self.assertIsNone(item['original']['sha256'])
+            self.assertEqual(self.bundle['artifact_sha256'].get(path),
+                             item['original']['registered_sha256'])
             self.assertTrue(item['recycled_at'])
             self.assertEqual(['a'], item['original']['scopes'])
+
+    def test_large_generated_artifact_is_recycled_without_content_io(self):
+        large = self.prefix + '/attempts/B/results/output/large.trace'
+        with (self.project / large).open('wb') as stream:
+            stream.truncate(8 * 1024 ** 3)
+        read = r.Tree.read
+        fingerprint = r.Tree.fingerprint
+
+        def guarded(operation):
+            def call(tree, path):
+                self.assertFalse(path.startswith(self.prefix + '/attempts/'), path)
+                self.assertFalse(path.startswith(r.STORE + '/quarantine/'), path)
+                return operation(tree, path)
+            return call
+
+        with mock.patch.object(r.Tree, 'read', guarded(read)), \
+                mock.patch.object(r.Tree, 'fingerprint', guarded(fingerprint)):
+            plan = self.plan()
+            self.assertTrue(r.apply_plan(self.project, plan)['completed'])
+        self.assertTrue(r.is_recycled(self.project, large))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX directory durability batching')
+    def test_directory_sync_is_batched_across_artifact_moves_and_deletes(self):
+        sources = [self.prefix + '/attempts/B/results/output/batch-' + str(index) for index in range(6)]
+        for path in sources:
+            self.write(path, 'batch')
+        with r.locked(self.project) as tree:
+            staged = [(path, r.STORE + '/quarantine/synthetic/' + str(index), tree.metadata(path))
+                      for index, path in enumerate(sources)]
+            sync = r.os.fsync
+            with mock.patch.object(r.os, 'fsync', wraps=sync) as flushed:
+                for source, target, stamp in staged:
+                    tree.move(source, target, stamp)
+                self.assertEqual(0, flushed.call_count)
+                tree.sync()
+                self.assertEqual(2, flushed.call_count)
+                for _, target, stamp in staged:
+                    tree.delete(target, stamp)
+                self.assertEqual(2, flushed.call_count)
+                tree.sync()
+                self.assertEqual(3, flushed.call_count)
 
     def test_checkpoint_attempt_path_protects_native_bundle_not_only_index(self):
         index = 'test/.cache/checkpoint-latest.json'
@@ -325,21 +510,21 @@ class RetentionTest(unittest.TestCase):
         self.assertIsNone(result['diagnostics'])
         self.assertIsNone(result['timing']['cleanup_scan_seconds'])
 
-    def test_stage_is_hashed_once_after_move_and_once_before_delete(self):
+    def test_stage_metadata_is_checked_after_move_and_before_delete(self):
         plan = self.plan()
         stage_reads = []
-        original = r.Tree.read
+        original = r.Tree.metadata
 
         def read(tree, path):
             if path.startswith(r.STORE + '/quarantine/'):
                 stage_reads.append(path)
             return original(tree, path)
 
-        with mock.patch.object(r.Tree, 'read', read):
+        with mock.patch.object(r.Tree, 'metadata', read):
             r.apply_plan(self.project, plan)
         for index, item in enumerate(plan['files']):
             path = r.STORE + '/quarantine/' + plan['plan_id'] + '/' + str(index)
-            # Windows verifies deletion through its pinned handle, not Tree.read.
+            # Windows verifies deletion through its pinned handle.
             self.assertEqual(1 if os.name == 'nt' else 2, stage_reads.count(path))
             self.assertTrue(r.is_recycled(self.project, item['path']))
 
@@ -358,6 +543,80 @@ class RetentionTest(unittest.TestCase):
     def test_expired_claim_is_not_an_active_run(self):
         self.state['claim'] = dict(owner='old', renewed_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
         self.assertIn(self.raw_path, self.paths(self.plan()))
+
+    def native_scratch(self):
+        self.state['recovery_required'] = True
+        prefix = self.prefix + '/attempts/interrupted'
+        scratch = prefix + '/results/output/.playwright-artifacts-1/trace/network'
+        self.write(scratch, 'discarded native workspace')
+        self.write(prefix + '/results/output/identity-ledger.json', {'owned': ['account']})
+        self.write(prefix + '/command.json', {'ended_at': r.now(), 'exit_code': 1})
+        return prefix, scratch
+
+    def test_recovery_reclaims_only_ended_unregistered_native_scratch(self):
+        prefix, scratch = self.native_scratch()
+        before = copy.deepcopy(self.state)
+        plan = self.plan()
+        self.assertEqual({scratch}, self.paths(plan))
+        self.assertEqual('ended_native_workspace', plan['files'][0]['reason'])
+        self.assertTrue(r.apply_plan(self.project, plan)['completed'])
+        self.assertFalse((self.project / scratch).exists())
+        self.assertTrue((self.project / (prefix + '/results/output/identity-ledger.json')).exists())
+        self.assertTrue((self.project / self.trace).exists())
+        self.assertEqual(before, json.loads((self.project / (self.prefix + '/state.json')).read_text()))
+
+    def test_native_scratch_needs_terminal_command_receipt(self):
+        prefix, scratch = self.native_scratch()
+        for receipt in ({}, {'ended_at': r.now()}, {'exit_code': 1},
+                        {'ended_at': r.now(), 'exit_code': True}, []):
+            with self.subTest(receipt=receipt):
+                self.write(prefix + '/command.json', receipt)
+                self.assertNotIn(scratch, self.paths(self.plan()))
+
+    def test_native_scratch_respects_current_active_and_quota(self):
+        _, scratch = self.native_scratch()
+        self.assertNotIn(scratch, self.paths(self.plan(current='old')))
+        self.state['claim'] = dict(owner='running', renewed_at=r.now(), lease_seconds=3600)
+        self.assertNotIn(scratch, self.paths(self.plan()))
+        self.state['claim'] = None
+        self.write('test/.cache/scheduling/quota.json', {'schema_version': 1, 'leases': {
+            'lease': {'run_id': 'old', 'status': 'active'}}})
+        self.assertNotIn(scratch, self.paths(self.plan()))
+
+    def test_native_scratch_in_nonterminal_recovery_stays_protected(self):
+        _, scratch = self.native_scratch()
+        self.state['acceptance'] = 'in_progress'
+        self.assertNotIn(scratch, self.paths(self.plan()))
+
+    def test_registered_recovery_attempt_keeps_native_scratch_and_relative_attachments(self):
+        prefix, scratch = self.native_scratch()
+        raw = prefix + '/results/result.json'
+        self.write(raw, {'attachments': [{'path': 'output/.playwright-artifacts-1/trace/network'}]})
+        self.state['report_bundles']['interrupted'] = {
+            'execution_result': raw, 'artifact_sha256': {}}
+        self.assertNotIn(scratch, self.paths(self.plan()))
+
+    def test_explicit_recovery_reference_protects_native_scratch(self):
+        _, scratch = self.native_scratch()
+        self.state['events'].append({'type': 'observation', 'evidence': [scratch]})
+        self.assertNotIn(scratch, self.paths(self.plan()))
+
+    def test_native_scratch_command_change_invalidates_plan(self):
+        prefix, scratch = self.native_scratch()
+        plan = self.plan()
+        self.write(prefix + '/command.json', {'exit_code': 1})
+        with self.assertRaises(ValueError):
+            r.apply_plan(self.project, plan)
+        self.assertTrue((self.project / scratch).exists())
+
+    def test_native_scratch_requires_exact_workspace_location(self):
+        prefix, _ = self.native_scratch()
+        paths = [prefix + '/results/output/.playwright-artifacts-custom/file',
+                 prefix + '/attachments/.playwright-artifacts-1/file',
+                 prefix + '/results/output/my-playwright-artifacts-1/file']
+        for path in paths:
+            self.write(path, 'protected')
+        self.assertFalse(set(paths) & self.paths(self.plan()))
 
     def test_long_workflow_claim_stays_active_and_legacy_claim_is_not_extended(self):
         self.state['claim'] = dict(owner='running', lease_seconds=3600,
@@ -719,13 +978,13 @@ class RetentionTest(unittest.TestCase):
         self.assertNotIn(self.raw_path, self.paths(full_scope))
         self.assertIn(merged, self.paths(full_scope))
 
-    def test_missing_or_unreadable_any_run_fails_closed(self):
+    def test_unreadable_run_fails_closed_missing_state_preserves_local_directory(self):
         self.write(r.RUNS + '/bad/state.json', '{broken')
         with self.assertRaises(ValueError):
             self.plan()
         (self.project / (r.RUNS + '/bad/state.json')).unlink()
-        with self.assertRaises(OSError):
-            self.plan()
+        plan = self.plan()
+        self.assertTrue(any(item['reason'] == 'unregistered_run_preserved' for item in plan['limitations']))
         self.assertTrue((self.project / self.raw_path).exists())
 
     def test_mutated_plan_rehash_does_not_grant_delete_capability(self):
@@ -813,16 +1072,21 @@ class RetentionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 r.apply_plan(Path(other).resolve(), plan)
 
-    def test_read_cache_hashes_each_file_once_per_selection(self):
+    def test_selection_reads_control_once_and_does_not_hash_report(self):
         calls = []
         original = r.Tree.read
+        fingerprint = r.Tree.fingerprint
         def counted(tree, path):
             calls.append(path)
             return original(tree, path)
+        def counted_fingerprint(tree, path):
+            calls.append(path)
+            return fingerprint(tree, path)
         self.save_state()
-        with r.locked(self.project) as tree, mock.patch.object(r.Tree, 'read', counted):
+        with r.locked(self.project) as tree, mock.patch.object(r.Tree, 'read', counted), \
+                mock.patch.object(r.Tree, 'fingerprint', counted_fingerprint):
             r.selection(tree, ['a'])
-        self.assertEqual(1, calls.count(self.raw_path))
+        self.assertEqual(0, calls.count(self.raw_path))
         self.assertEqual(1, calls.count(self.prefix + '/state.json'))
 
     def test_crash_after_staging_resumes_same_plan(self):
@@ -856,6 +1120,7 @@ class RetentionTest(unittest.TestCase):
 
     def test_reference_race_during_staging_restores_original_bytes(self):
         plan = self.plan()
+        before = {item['path']: (self.project / item['path']).read_bytes() for item in plan['files']}
         original = r.quarantine
         called = []
         def race(tree, item, stage):
@@ -867,7 +1132,7 @@ class RetentionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 r.apply_plan(self.project, plan)
         for item in plan['files']:
-            self.assertEqual(item['sha256'], hashlib.sha256((self.project / item['path']).read_bytes()).hexdigest())
+            self.assertEqual(before[item['path']], (self.project / item['path']).read_bytes())
 
     def test_cli_plan_apply_json_exit_and_immutable_export(self):
         self.save_state()

@@ -246,6 +246,12 @@ class FixtureContractProbeTest(unittest.TestCase):
         self.assertTrue(all(result['checks'].values()))
         self.assertEqual(64, len(result['adapter_fingerprint']))
 
+    def test_local_service_does_not_require_reverse_dns(self):
+        with mock.patch('socket.getfqdn', side_effect=AssertionError('unexpected reverse DNS')), \
+                mock.patch('socket.gethostbyaddr', side_effect=AssertionError('unexpected reverse DNS')):
+            result = self.inspect(contracts=['partial'])
+        self.assertTrue(result['valid'], result)
+
     def test_select_only_applicable_contracts(self):
         result = self.inspect(contracts=['absence'])
         self.assertTrue(result['valid'], result)
